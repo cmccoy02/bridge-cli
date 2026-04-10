@@ -1,0 +1,14 @@
+{
+  "name": "my-project",
+  "repoUrl": "git@github.com:user/my-project.git",
+  "packageManager": "npm",
+  "installCommand": "npm install",
+  "updateCommand": "npm update",
+  "cleanCommands": [
+    "rm -rf node_modules",
+    "rm -f package-lock.json"
+  ],
+  "beforeScripts": [],
+  "afterScripts": [],
+  "branchPrefix": "bridge/patch"
+}

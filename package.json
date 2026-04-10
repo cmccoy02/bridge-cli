@@ -1,0 +1,39 @@
+{
+  "name": "bridge-cli",
+  "version": "0.1.0",
+  "description": "Automated, non-breaking dependency updates. One command. One PR.",
+  "type": "module",
+  "bin": {
+    "bridge": "bin/bridge.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "templates",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "start": "node ./bin/bridge.js",
+    "smoke": "node ./bin/bridge.js --help"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "dependencies",
+    "automation",
+    "cli",
+    "git",
+    "devops"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "boxen": "^8.0.1",
+    "chalk": "^5.4.1",
+    "commander": "^12.1.0",
+    "ora": "^8.1.1",
+    "prompts": "^2.4.2",
+    "simple-git": "^3.28.0"
+  }
+}
