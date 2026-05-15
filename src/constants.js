@@ -2,7 +2,6 @@ export const CONFIG_FILE_NAME = 'bridge.config.json';
 export const DEFAULT_BRANCH_PREFIX = 'bridge/patch';
 
 export const REQUIRED_CONFIG_FIELDS = [
-  'repoUrl',
   'packageManager',
   'installCommand',
   'updateCommand',
@@ -46,7 +45,6 @@ export const PACKAGE_MANAGER_OPTIONS = ['npm', 'yarn', 'pnpm', 'pip', 'mix'];
 
 export const DEFAULT_CONFIG = {
   name: '',
-  repoUrl: '',
   packageManager: 'npm',
   installCommand: PACKAGE_MANAGER_PRESETS.npm.installCommand,
   updateCommand: PACKAGE_MANAGER_PRESETS.npm.updateCommand,

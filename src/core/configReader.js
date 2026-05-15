@@ -7,6 +7,8 @@ import {
   REQUIRED_CONFIG_FIELDS
 } from '../constants.js';
 
+const CONFIG_CANDIDATES = [CONFIG_FILE_NAME, '.bridge.config.json'];
+
 export class ConfigError extends Error {
   constructor(message, issues = []) {
     super(message);
@@ -94,17 +96,34 @@ export function normalizeConfig(config) {
 }
 
 export async function readConfigFile(cwd = process.cwd()) {
-  const configPath = path.join(cwd, CONFIG_FILE_NAME);
-  let raw;
+  let configPath = '';
+  let raw = '';
+  let lastError = null;
 
-  try {
-    raw = await fs.readFile(configPath, 'utf8');
-  } catch (error) {
-    if (error && error.code === 'ENOENT') {
-      throw new ConfigError('No bridge.config.json found. Run `bridge init` first.');
+  for (const candidate of CONFIG_CANDIDATES) {
+    const candidatePath = path.join(cwd, candidate);
+
+    try {
+      raw = await fs.readFile(candidatePath, 'utf8');
+      configPath = candidatePath;
+      break;
+    } catch (error) {
+      lastError = error;
+
+      if (!error || error.code !== 'ENOENT') {
+        throw new ConfigError(`Could not read ${candidate}: ${error.message}`);
+      }
+    }
+  }
+
+  if (!configPath) {
+    if (lastError && lastError.code !== 'ENOENT') {
+      throw new ConfigError(`Could not read config file: ${lastError.message}`);
     }
 
-    throw new ConfigError(`Could not read ${CONFIG_FILE_NAME}: ${error.message}`);
+    throw new ConfigError(
+      'No bridge.config.json or .bridge.config.json found. Run `bridge init` first.'
+    );
   }
 
   try {

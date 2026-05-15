@@ -4,15 +4,22 @@ import path from 'node:path';
 
 import { DEFAULT_BRANCH_PREFIX } from '../constants.js';
 import { loadConfig } from '../core/configReader.js';
+import {
+  logPhase,
+  logRunEnd,
+  logRunFailure,
+  logRunStart,
+  makeRunContext
+} from '../core/activityLogger.js';
 import { CommandExecutionError, runCommand, runCommands } from '../core/executor.js';
 import {
-  cloneRepository,
   commitChanges,
   createBranch,
+  getOriginUrl,
   getCompareUrl,
   hasStagedChanges,
-  inferRepoName,
   pushBranch,
+  refreshFromOrigin,
   resolveBranchName,
   stageAll
 } from '../core/git.js';
@@ -35,6 +42,38 @@ function sanitizeSegment(value) {
     .replace(/^-+|-+$/g, '');
 
   return normalized || 'repo';
+}
+
+function shouldExcludeFromCopy(sourcePath) {
+  const name = path.basename(sourcePath);
+  return name === 'node_modules' || name === '.venv' || name === 'venv';
+}
+
+async function fileExists(filePath) {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function copyToIsolatedWorkspace(sourceDir, destinationDir) {
+  await fs.cp(sourceDir, destinationDir, {
+    recursive: true,
+    force: true,
+    filter: (sourcePath) => {
+      if (sourcePath === sourceDir) {
+        return true;
+      }
+
+      if (sourcePath.startsWith(destinationDir)) {
+        return false;
+      }
+
+      return !shouldExcludeFromCopy(sourcePath);
+    }
+  });
 }
 
 async function runPhase(spinnerText, successText, task) {
@@ -80,17 +119,26 @@ async function runOptionalScripts(title, scripts, cwd, groupName) {
 
 export async function patchCommand({ cwd = process.cwd() } = {}) {
   let config;
+  let configPath = '';
+  const run = makeRunContext('patch', cwd);
 
   try {
-    ({ config } = await loadConfig(cwd));
+    ({ config, configPath } = await loadConfig(cwd));
   } catch (configError) {
     error(configError.message);
+    await logRunFailure(run, configError);
+    await logRunEnd(run, 'failed_preflight');
     return false;
   }
 
+  await logRunStart(run, {
+    packageManager: config.packageManager,
+    hasRepoUrl: Boolean(config.repoUrl)
+  });
+
   printBanner();
 
-  const repoName = config.name || inferRepoName(config.repoUrl);
+  const repoName = config.name || path.basename(cwd);
   const tempDir = path.join(os.tmpdir(), `bridge-${sanitizeSegment(repoName)}-${Date.now()}`);
   const branchPrefix = config.branchPrefix || DEFAULT_BRANCH_PREFIX;
   const dateStamp = getDateStamp();
@@ -98,22 +146,41 @@ export async function patchCommand({ cwd = process.cwd() } = {}) {
   let branchName = '';
   let compareUrl = '';
   let status = 'failed';
+  let changedFilesCount = 0;
 
   try {
-    await runPhase('Cloning repository...', 'Cloned to isolated environment', async () => {
+    await runPhase('Copying repository...', 'Copied to isolated environment', async () => {
+      await copyToIsolatedWorkspace(cwd, tempDir);
+      await logPhase(run, 'copy', 'success', { tempDir });
+    });
+
+    await runPhase('Syncing with origin...', 'Fetched latest remote state', async () => {
       try {
-        await cloneRepository(config.repoUrl, tempDir);
-      } catch {
-        throw new Error('Could not clone repository. Check your repoUrl and Git credentials.');
+        await refreshFromOrigin(tempDir, { cleanLocal: true });
+
+        const configFileName = path.basename(configPath);
+        const sourceConfigPath = path.join(cwd, configFileName);
+        const copiedConfigPath = path.join(tempDir, configFileName);
+
+        if (await fileExists(sourceConfigPath)) {
+          await fs.copyFile(sourceConfigPath, copiedConfigPath);
+        }
+
+        await logPhase(run, 'sync', 'success');
+      } catch (syncError) {
+        warn(`Could not fast-forward to origin. Continuing with local snapshot: ${syncError.message}`);
+        await logPhase(run, 'sync', 'warning', { message: syncError.message });
       }
     });
 
     await runPhase('Running clean commands...', 'Cleaned dependency artifacts', async () => {
       await runCommands(config.cleanCommands, { cwd: tempDir, quiet: true });
+      await logPhase(run, 'clean', 'success');
     });
 
     await runPhase('Running install command...', 'Fresh install complete', async () => {
       await runCommand(config.installCommand, { cwd: tempDir, quiet: true });
+      await logPhase(run, 'install', 'success');
     });
 
     await runPhase(
@@ -121,12 +188,14 @@ export async function patchCommand({ cwd = process.cwd() } = {}) {
       'Dependencies updated to latest non-breaking versions',
       async () => {
         await runCommand(config.updateCommand, { cwd: tempDir, quiet: true });
+        await logPhase(run, 'update', 'success');
       }
     );
 
     await runPhase('Regenerating lockfile...', 'Clean lockfile generated', async () => {
       await runCommands(config.cleanCommands, { cwd: tempDir, quiet: true });
       await runCommand(config.installCommand, { cwd: tempDir, quiet: true });
+      await logPhase(run, 'reinstall', 'success');
     });
 
     await runOptionalScripts('Running before scripts...', config.beforeScripts, tempDir, 'beforeScripts');
@@ -136,26 +205,44 @@ export async function patchCommand({ cwd = process.cwd() } = {}) {
       branchName = await resolveBranchName(tempDir, branchPrefix, dateStamp);
       await createBranch(tempDir, branchName);
       await stageAll(tempDir);
+      await logPhase(run, 'prepare_git', 'success', { branchName });
     });
 
     if (!(await hasStagedChanges(tempDir))) {
       success('All dependencies are already up to date. Nothing to patch.');
       status = 'up_to_date';
+      await logRunEnd(run, 'up_to_date', { branchName });
       return true;
     }
+
+    const stagedFilesResult = await runCommand('git diff --staged --name-only', {
+      cwd: tempDir,
+      quiet: true
+    });
+    changedFilesCount = stagedFilesResult.stdout
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean).length;
 
     await runPhase('Committing and pushing branch...', 'PR branch pushed. Open your repo to create the pull request.', async () => {
       await commitChanges(tempDir, 'bridge: update dependencies (non-breaking)');
       await pushBranch(tempDir, branchName);
+      await logPhase(run, 'push', 'success', { branchName });
     });
 
-    compareUrl = getCompareUrl(config.repoUrl, branchName);
+    const originUrl = await getOriginUrl(tempDir);
+    compareUrl = getCompareUrl(originUrl || config.repoUrl, branchName);
 
     if (compareUrl) {
       line(compareUrl);
     }
 
     status = 'pushed';
+    await logRunEnd(run, 'pushed', {
+      branchName,
+      compareUrl,
+      changedFilesCount
+    });
     return true;
   } catch (patchError) {
     if (patchError instanceof CommandExecutionError) {
@@ -169,6 +256,8 @@ export async function patchCommand({ cwd = process.cwd() } = {}) {
       error(patchError.message);
     }
 
+    await logRunFailure(run, patchError, { branchName });
+    await logRunEnd(run, 'failed', { branchName });
     return false;
   } finally {
     try {
@@ -182,6 +271,7 @@ export async function patchCommand({ cwd = process.cwd() } = {}) {
         [
           'Bridge complete.',
           `Branch: ${branchName}`,
+          `Files changed: ${changedFilesCount}`,
           compareUrl ? `Compare: ${compareUrl}` : 'Compare URL unavailable.',
           'Review your changes and merge when ready.'
         ],

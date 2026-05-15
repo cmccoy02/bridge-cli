@@ -1,6 +1,5 @@
 {
   "name": "my-project",
-  "repoUrl": "git@github.com:user/my-project.git",
   "packageManager": "npm",
   "installCommand": "npm install",
   "updateCommand": "npm update",

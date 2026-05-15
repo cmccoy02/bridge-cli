@@ -1,7 +1,11 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 
 import { PACKAGE_MANAGER_PRESETS } from '../constants.js';
+
+const execFileAsync = promisify(execFile);
 
 async function fileExists(filePath) {
   try {
@@ -12,32 +16,123 @@ async function fileExists(filePath) {
   }
 }
 
-function detectPackageManagerByFiles(flags) {
-  if (flags.hasPackageLock) {
-    return 'npm';
-  }
+async function readPackageLock(cwd) {
+  const filePath = path.join(cwd, 'package-lock.json');
 
-  if (flags.hasYarnLock) {
-    return 'yarn';
-  }
+  try {
+    const content = await fs.readFile(filePath, 'utf8');
+    const parsed = JSON.parse(content);
 
-  if (flags.hasPnpmLock) {
-    return 'pnpm';
-  }
-
-  if (flags.hasRequirements) {
-    return 'pip';
-  }
-
-  if (flags.hasMixExs) {
-    return 'mix';
+    if (parsed && typeof parsed === 'object' && parsed.lockfileVersion) {
+      return 'npm';
+    }
+  } catch {
+    return null;
   }
 
   return null;
 }
 
-async function readOriginUrl(cwd) {
-  const gitConfigPath = path.join(cwd, '.git', 'config');
+async function readYarnLock(cwd) {
+  const filePath = path.join(cwd, 'yarn.lock');
+
+  try {
+    const content = await fs.readFile(filePath, 'utf8');
+    const trimmed = content.trim();
+
+    if (
+      trimmed.includes('yarn lockfile') ||
+      trimmed.includes('__metadata:') ||
+      trimmed.length > 0
+    ) {
+      return 'yarn';
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+async function readPnpmLock(cwd) {
+  const filePath = path.join(cwd, 'pnpm-lock.yaml');
+
+  try {
+    const content = await fs.readFile(filePath, 'utf8');
+
+    if (/lockfileVersion:/m.test(content)) {
+      return 'pnpm';
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+async function detectPackageManagerByLockfiles(cwd) {
+  const matches = new Set();
+  const lockDetections = await Promise.all([
+    readPackageLock(cwd),
+    readYarnLock(cwd),
+    readPnpmLock(cwd)
+  ]);
+
+  for (const candidate of lockDetections) {
+    if (candidate) {
+      matches.add(candidate);
+    }
+  }
+
+  if (matches.size === 1) {
+    return [...matches][0];
+  }
+
+  return null;
+}
+
+async function readGitOriginFromCommand(cwd) {
+  try {
+    const { stdout } = await execFileAsync('git', ['remote', 'get-url', 'origin'], { cwd });
+    return stdout.trim();
+  } catch {
+    return '';
+  }
+}
+
+async function resolveGitDirectory(cwd) {
+  const dotGitPath = path.join(cwd, '.git');
+
+  try {
+    const stat = await fs.stat(dotGitPath);
+
+    if (stat.isDirectory()) {
+      return dotGitPath;
+    }
+
+    if (stat.isFile()) {
+      const content = await fs.readFile(dotGitPath, 'utf8');
+      const match = content.match(/gitdir:\s*(.+)/i);
+
+      if (match && match[1]) {
+        return path.resolve(cwd, match[1].trim());
+      }
+    }
+  } catch {
+    return '';
+  }
+
+  return '';
+}
+
+async function readOriginUrlFromGitConfig(cwd) {
+  const gitDir = await resolveGitDirectory(cwd);
+
+  if (!gitDir) {
+    return '';
+  }
+
+  const gitConfigPath = path.join(gitDir, 'config');
 
   try {
     const content = await fs.readFile(gitConfigPath, 'utf8');
@@ -62,6 +157,16 @@ async function readOriginUrl(cwd) {
   }
 }
 
+async function readOriginUrl(cwd) {
+  const fromCommand = await readGitOriginFromCommand(cwd);
+
+  if (fromCommand) {
+    return fromCommand;
+  }
+
+  return readOriginUrlFromGitConfig(cwd);
+}
+
 async function readPackageName(cwd) {
   const packageJsonPath = path.join(cwd, 'package.json');
 
@@ -75,24 +180,21 @@ async function readPackageName(cwd) {
 }
 
 export async function detectProject(cwd = process.cwd()) {
-  const flags = {
-    hasPackageLock: await fileExists(path.join(cwd, 'package-lock.json')),
-    hasYarnLock: await fileExists(path.join(cwd, 'yarn.lock')),
-    hasPnpmLock: await fileExists(path.join(cwd, 'pnpm-lock.yaml')),
-    hasRequirements: await fileExists(path.join(cwd, 'requirements.txt')),
-    hasMixExs: await fileExists(path.join(cwd, 'mix.exs'))
-  };
-
-  const packageManager = detectPackageManagerByFiles(flags);
+  const packageManager = await detectPackageManagerByLockfiles(cwd);
   const repoUrl = await readOriginUrl(cwd);
   const name = await readPackageName(cwd);
+  const hasRequirements = await fileExists(path.join(cwd, 'requirements.txt'));
+  const hasMixExs = await fileExists(path.join(cwd, 'mix.exs'));
 
-  const detectedMessage = packageManager
-    ? `We detected a ${PACKAGE_MANAGER_PRESETS[packageManager].label}.`
+  const fallbackManager = hasRequirements ? 'pip' : hasMixExs ? 'mix' : null;
+  const resolvedPackageManager = packageManager || fallbackManager;
+
+  const detectedMessage = resolvedPackageManager
+    ? `We detected a ${PACKAGE_MANAGER_PRESETS[resolvedPackageManager].label}.`
     : 'We could not auto-detect a package manager, so you can choose one.';
 
   return {
-    packageManager,
+    packageManager: resolvedPackageManager,
     repoUrl,
     name,
     detectedMessage

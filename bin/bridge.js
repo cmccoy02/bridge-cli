@@ -32,7 +32,7 @@ program
 
 program
   .command('patch')
-  .description('Clone, patch dependencies, and push a PR branch')
+  .description('Copy, patch dependencies, and push a PR branch')
   .action(async () => {
     const ok = await patchCommand();
     if (!ok) {

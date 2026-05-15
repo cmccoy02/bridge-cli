@@ -30,6 +30,48 @@ export async function pushBranch(cwd, branchName) {
   await getGit(cwd).push('origin', branchName);
 }
 
+export async function getOriginUrl(cwd) {
+  const remotes = await getGit(cwd).getRemotes(true);
+  const origin = remotes.find((remote) => remote.name === 'origin');
+
+  if (!origin || !origin.refs) {
+    return '';
+  }
+
+  return origin.refs.push || origin.refs.fetch || '';
+}
+
+export async function cleanWorkingTree(cwd) {
+  const git = getGit(cwd);
+  await git.raw(['reset', '--hard', 'HEAD']);
+  await git.raw(['clean', '-fd']);
+}
+
+export async function refreshFromOrigin(cwd, { cleanLocal = false } = {}) {
+  const git = getGit(cwd);
+  const remotes = await git.getRemotes();
+  const hasOrigin = remotes.some((remote) => remote.name === 'origin');
+
+  if (!hasOrigin) {
+    return { hasOrigin: false, updated: false, branch: '' };
+  }
+
+  if (cleanLocal) {
+    await cleanWorkingTree(cwd);
+  }
+
+  await git.fetch('origin');
+
+  const branch = (await git.revparse(['--abbrev-ref', 'HEAD'])).trim();
+
+  if (!branch || branch === 'HEAD') {
+    return { hasOrigin: true, updated: true, branch: '' };
+  }
+
+  await git.pull('origin', branch, { '--ff-only': null });
+  return { hasOrigin: true, updated: true, branch };
+}
+
 export async function remoteBranchExists(cwd, branchName) {
   const output = await getGit(cwd).listRemote(['--heads', 'origin', branchName]);
   return output.trim().length > 0;

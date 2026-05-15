@@ -2,7 +2,7 @@
 
 Automated, non-breaking dependency updates. One command. One PR.
 
-Bridge clones your repository into an isolated temp environment, updates dependencies using your config, and pushes a PR-ready branch without touching your local working directory.
+Bridge copies your current repository into an isolated temp environment, updates dependencies using your config, and pushes a PR-ready branch without touching your local working directory.
 
 ## Quick Start
 
@@ -10,6 +10,12 @@ Bridge clones your repository into an isolated temp environment, updates depende
 
 ```bash
 npm install -g bridge-cli
+```
+
+If `bridge` conflicts with another local binary, use:
+
+```bash
+bridge-cli --help
 ```
 
 2. Initialize Bridge in your project:
@@ -37,13 +43,13 @@ Auto-detection before prompts:
 - `pnpm-lock.yaml` -> `pnpm`
 - `requirements.txt` -> `pip`
 - `mix.exs` -> `mix`
-- `.git/config` origin URL -> pre-fills `repoUrl`
 - `package.json` `name` -> pre-fills `name`
 
 ### `bridge patch`
 
 Runs the patch engine end-to-end:
-- Clone to temp dir
+- Copy to temp dir
+- Clean the copied repo snapshot and fast-forward from origin when available
 - Clean/install/update/reinstall using config commands
 - Run optional scripts
 - Create branch, commit, push
@@ -62,14 +68,16 @@ Validates config and runtime prerequisites.
 
 Prints the current `bridge.config.json` to the terminal.
 
+Bridge also writes local operation logs to:
+- `~/.bridge/logs/operations.log`
+
 ## Config Reference
 
-File: `bridge.config.json`
+File: `bridge.config.json` (or `.bridge.config.json`)
 
 ```json
 {
   "name": "my-project",
-  "repoUrl": "git@github.com:user/my-project.git",
   "packageManager": "npm",
   "installCommand": "npm install",
   "updateCommand": "npm update",
@@ -84,7 +92,6 @@ File: `bridge.config.json`
 ```
 
 Required fields:
-- `repoUrl`
 - `packageManager`
 - `installCommand`
 - `updateCommand`
@@ -92,6 +99,7 @@ Required fields:
 
 Optional fields:
 - `name`
+- `repoUrl` (if omitted, Bridge uses `origin` from git)
 - `beforeScripts`
 - `afterScripts`
 - `branchPrefix` (defaults to `bridge/patch`)
@@ -136,10 +144,11 @@ Optional fields:
 Bridge is intentionally simple and deterministic:
 
 1. Read `bridge.config.json`
-2. Clone repo into an isolated temp directory
-3. Run your configured clean/install/update commands
-4. Commit and push a branch only if changes exist
-5. Cleanup temp directory
+2. Copy repo into an isolated temp directory
+3. Clean and sync the copied snapshot from origin (when available)
+4. Run your configured clean/install/update commands
+5. Commit and push a branch only if changes exist
+6. Cleanup temp directory
 
 No language-specific core logic. Your config defines the workflow.
 

@@ -9,6 +9,12 @@ import {
   PACKAGE_MANAGER_OPTIONS,
   PACKAGE_MANAGER_PRESETS
 } from '../constants.js';
+import {
+  logRunEnd,
+  logRunFailure,
+  logRunStart,
+  makeRunContext
+} from '../core/activityLogger.js';
 import { detectProject } from '../core/detector.js';
 import { formatConfig } from '../core/configReader.js';
 import { printBanner } from '../ui/banner.js';
@@ -31,48 +37,47 @@ function managerPromptIndex(defaultManager) {
 }
 
 export async function initCommand({ cwd = process.cwd() } = {}) {
+  const run = makeRunContext('init', cwd);
+
   try {
+    await logRunStart(run);
     printBanner();
 
     const detected = await detectProject(cwd);
-    const detectedManager = detected.packageManager || 'npm';
+    const detectedManager = detected.packageManager || null;
 
     info(detected.detectedMessage);
     line();
 
-    const baseResponses = await prompts(
-      [
-        {
-          type: 'text',
-          name: 'name',
-          message: 'Project name',
-          initial: detected.name || ''
-        },
-        {
-          type: 'text',
-          name: 'repoUrl',
-          message: 'Repository URL',
-          initial: detected.repoUrl || ''
-        },
-        {
-          type: 'select',
-          name: 'packageManager',
-          message: 'Package manager',
-          choices: PACKAGE_MANAGER_OPTIONS.map((value) => ({
-            title: value,
-            value
-          })),
-          initial: managerPromptIndex(detectedManager)
-        }
-      ],
+    const basePrompts = [
       {
-        onCancel: () => {
-          throw new Error('Initialization canceled.');
-        }
+        type: 'text',
+        name: 'name',
+        message: 'Project name',
+        initial: detected.name || ''
       }
-    );
+    ];
 
-    const packageManager = baseResponses.packageManager || detectedManager;
+    if (!detectedManager) {
+      basePrompts.push({
+        type: 'select',
+        name: 'packageManager',
+        message: 'Package manager',
+        choices: PACKAGE_MANAGER_OPTIONS.map((value) => ({
+          title: value,
+          value
+        })),
+        initial: managerPromptIndex('npm')
+      });
+    }
+
+    const baseResponses = await prompts(basePrompts, {
+      onCancel: () => {
+        throw new Error('Initialization canceled.');
+      }
+    });
+
+    const packageManager = detectedManager || baseResponses.packageManager || 'npm';
     const managerPreset = PACKAGE_MANAGER_PRESETS[packageManager] || PACKAGE_MANAGER_PRESETS.npm;
 
     const detailResponses = await prompts(
@@ -123,7 +128,6 @@ export async function initCommand({ cwd = process.cwd() } = {}) {
 
     const config = {
       name: (baseResponses.name || '').trim(),
-      repoUrl: (baseResponses.repoUrl || '').trim(),
       packageManager,
       installCommand: (detailResponses.installCommand || '').trim(),
       updateCommand: (detailResponses.updateCommand || '').trim(),
@@ -132,6 +136,12 @@ export async function initCommand({ cwd = process.cwd() } = {}) {
       afterScripts: parseCommandList(detailResponses.afterScripts, []),
       branchPrefix: (detailResponses.branchPrefix || DEFAULT_BRANCH_PREFIX).trim()
     };
+
+    const detectedRepoUrl = (detected.repoUrl || '').trim();
+
+    if (detectedRepoUrl) {
+      config.repoUrl = detectedRepoUrl;
+    }
 
     line('Config preview:');
     line(formatConfig(config));
@@ -155,6 +165,7 @@ export async function initCommand({ cwd = process.cwd() } = {}) {
 
     if (!confirmWrite) {
       warn('Initialization canceled.');
+      await logRunEnd(run, 'canceled');
       return false;
     }
 
@@ -164,14 +175,21 @@ export async function initCommand({ cwd = process.cwd() } = {}) {
     success(`Created ${CONFIG_FILE_NAME}`);
     line();
     info('Run `bridge patch` to create your first update PR.');
+    await logRunEnd(run, 'created', {
+      packageManager: config.packageManager,
+      hasRepoUrl: Boolean(config.repoUrl)
+    });
 
     return true;
   } catch (error) {
     if (error.message === 'Initialization canceled.') {
       warn(error.message);
+      await logRunEnd(run, 'canceled');
       return false;
     }
 
+    await logRunFailure(run, error);
+    await logRunEnd(run, 'failed');
     throw error;
   }
 }

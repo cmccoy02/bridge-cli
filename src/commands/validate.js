@@ -1,5 +1,12 @@
 import { loadConfig } from '../core/configReader.js';
+import {
+  logRunEnd,
+  logRunFailure,
+  logRunStart,
+  makeRunContext
+} from '../core/activityLogger.js';
 import { commandExists, runCommand } from '../core/executor.js';
+import { getOriginUrl } from '../core/git.js';
 import { error, line, success } from '../ui/logger.js';
 
 function firstToken(commandString) {
@@ -15,6 +22,9 @@ function quote(value) {
 }
 
 export async function validateCommand({ cwd = process.cwd(), offline = false } = {}) {
+  const run = makeRunContext('validate', cwd);
+  await logRunStart(run, { offline });
+
   let config;
   const issues = [];
 
@@ -46,13 +56,17 @@ export async function validateCommand({ cwd = process.cwd(), offline = false } =
     }
 
     if (!offline) {
-      const probe = await runCommand(`git ls-remote ${quote(config.repoUrl)} HEAD`, {
-        allowFailure: true,
-        quiet: true
-      });
+      const originUrl = config.repoUrl || (await getOriginUrl(cwd));
 
-      if (!probe.success) {
-        issues.push('Repository is not reachable. Check repoUrl and Git credentials.');
+      if (originUrl) {
+        const probe = await runCommand(`git ls-remote ${quote(originUrl)} HEAD`, {
+          allowFailure: true,
+          quiet: true
+        });
+
+        if (!probe.success) {
+          issues.push('Repository is not reachable. Check your origin remote and Git credentials.');
+        }
       }
     }
   }
@@ -64,6 +78,10 @@ export async function validateCommand({ cwd = process.cwd(), offline = false } =
       line(`- ${issue}`);
     }
 
+    await logRunFailure(run, new Error('Validation failed'), {
+      issues
+    });
+    await logRunEnd(run, 'failed', { issuesCount: issues.length });
     return false;
   }
 
@@ -73,8 +91,11 @@ export async function validateCommand({ cwd = process.cwd(), offline = false } =
   if (offline) {
     success('Skipped repo reachability check (--offline).');
   } else {
-    success('Repository is reachable.');
+    success('Repository reachability check complete.');
   }
 
+  await logRunEnd(run, 'passed', {
+    offline
+  });
   return true;
 }
