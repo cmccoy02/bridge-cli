@@ -167,6 +167,30 @@ async function readOriginUrl(cwd) {
   return readOriginUrlFromGitConfig(cwd);
 }
 
+function deriveNameFromRepoUrl(repoUrl) {
+  if (!repoUrl || typeof repoUrl !== 'string') {
+    return '';
+  }
+
+  const normalized = repoUrl.trim().replace(/\.git$/, '').replace(/\/$/, '');
+
+  if (!normalized) {
+    return '';
+  }
+
+  const parts = normalized.split(/[/:]/).filter(Boolean);
+  return parts.at(-1) || '';
+}
+
+async function readGitConfigValue(cwd, key) {
+  try {
+    const { stdout } = await execFileAsync('git', ['config', '--get', key], { cwd });
+    return stdout.trim();
+  } catch {
+    return '';
+  }
+}
+
 async function readPackageName(cwd) {
   const packageJsonPath = path.join(cwd, 'package.json');
 
@@ -182,7 +206,12 @@ async function readPackageName(cwd) {
 export async function detectProject(cwd = process.cwd()) {
   const packageManager = await detectPackageManagerByLockfiles(cwd);
   const repoUrl = await readOriginUrl(cwd);
-  const name = await readPackageName(cwd);
+  const packageName = await readPackageName(cwd);
+  const gitConfiguredRepoUrl = await readGitConfigValue(cwd, 'remote.origin.url');
+  const fallbackRepoUrl = repoUrl || gitConfiguredRepoUrl;
+  const derivedNameFromRemote = deriveNameFromRepoUrl(fallbackRepoUrl);
+  const directoryName = path.basename(cwd);
+  const name = packageName || derivedNameFromRemote || directoryName;
   const hasRequirements = await fileExists(path.join(cwd, 'requirements.txt'));
   const hasMixExs = await fileExists(path.join(cwd, 'mix.exs'));
 
@@ -195,7 +224,7 @@ export async function detectProject(cwd = process.cwd()) {
 
   return {
     packageManager: resolvedPackageManager,
-    repoUrl,
+    repoUrl: fallbackRepoUrl,
     name,
     detectedMessage
   };

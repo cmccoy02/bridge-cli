@@ -47,6 +47,58 @@ export async function cleanWorkingTree(cwd) {
   await git.raw(['clean', '-fd']);
 }
 
+async function remoteBranchRefExists(git, remoteBranchRef) {
+  try {
+    await git.raw(['show-ref', '--verify', '--quiet', remoteBranchRef]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function detectDefaultBaseBranch(git) {
+  try {
+    const remoteHead = (
+      await git.raw(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'])
+    ).trim();
+
+    if (remoteHead.startsWith('origin/')) {
+      return remoteHead.replace(/^origin\//, '');
+    }
+  } catch {
+    // Fall through to additional heuristics.
+  }
+
+  const candidates = ['main', 'master'];
+
+  for (const candidate of candidates) {
+    if (await remoteBranchRefExists(git, `refs/remotes/origin/${candidate}`)) {
+      return candidate;
+    }
+  }
+
+  const currentBranch = (await git.revparse(['--abbrev-ref', 'HEAD'])).trim();
+
+  if (
+    currentBranch &&
+    currentBranch !== 'HEAD' &&
+    (await remoteBranchRefExists(git, `refs/remotes/origin/${currentBranch}`))
+  ) {
+    return currentBranch;
+  }
+
+  const remoteBranches = (await git.raw(['branch', '-r']))
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith('origin/') && !line.includes(' -> '));
+
+  if (remoteBranches.length > 0) {
+    return remoteBranches[0].replace(/^origin\//, '');
+  }
+
+  return '';
+}
+
 export async function refreshFromOrigin(cwd, { cleanLocal = false } = {}) {
   const git = getGit(cwd);
   const remotes = await git.getRemotes();
@@ -61,14 +113,13 @@ export async function refreshFromOrigin(cwd, { cleanLocal = false } = {}) {
   }
 
   await git.fetch('origin');
+  const branch = await detectDefaultBaseBranch(git);
 
-  const branch = (await git.revparse(['--abbrev-ref', 'HEAD'])).trim();
-
-  if (!branch || branch === 'HEAD') {
+  if (!branch) {
     return { hasOrigin: true, updated: true, branch: '' };
   }
 
-  await git.pull('origin', branch, { '--ff-only': null });
+  await git.checkout(['-B', branch, `origin/${branch}`]);
   return { hasOrigin: true, updated: true, branch };
 }
 

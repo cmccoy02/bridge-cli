@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { DEFAULT_BRANCH_PREFIX } from '../constants.js';
-import { loadConfig } from '../core/configReader.js';
+import { formatConfig, loadConfig } from '../core/configReader.js';
 import {
   logPhase,
   logRunEnd,
@@ -117,6 +117,22 @@ async function runOptionalScripts(title, scripts, cwd, groupName) {
   }
 }
 
+async function ensureBridgeConfigTracked(tempDir, config) {
+  const tracked = await runCommand('git ls-files --error-unmatch bridge.config.json', {
+    cwd: tempDir,
+    allowFailure: true,
+    quiet: true
+  });
+
+  if (tracked.success) {
+    return false;
+  }
+
+  const configPath = path.join(tempDir, 'bridge.config.json');
+  await fs.writeFile(configPath, `${formatConfig(config)}\n`, 'utf8');
+  return true;
+}
+
 export async function patchCommand({ cwd = process.cwd() } = {}) {
   let config;
   let configPath = '';
@@ -147,6 +163,7 @@ export async function patchCommand({ cwd = process.cwd() } = {}) {
   let compareUrl = '';
   let status = 'failed';
   let changedFilesCount = 0;
+  let baseBranch = '';
 
   try {
     await runPhase('Copying repository...', 'Copied to isolated environment', async () => {
@@ -156,7 +173,8 @@ export async function patchCommand({ cwd = process.cwd() } = {}) {
 
     await runPhase('Syncing with origin...', 'Fetched latest remote state', async () => {
       try {
-        await refreshFromOrigin(tempDir, { cleanLocal: true });
+        const syncResult = await refreshFromOrigin(tempDir, { cleanLocal: true });
+        baseBranch = syncResult.branch || '';
 
         const configFileName = path.basename(configPath);
         const sourceConfigPath = path.join(cwd, configFileName);
@@ -166,7 +184,9 @@ export async function patchCommand({ cwd = process.cwd() } = {}) {
           await fs.copyFile(sourceConfigPath, copiedConfigPath);
         }
 
-        await logPhase(run, 'sync', 'success');
+        await logPhase(run, 'sync', 'success', {
+          baseBranch
+        });
       } catch (syncError) {
         warn(`Could not fast-forward to origin. Continuing with local snapshot: ${syncError.message}`);
         await logPhase(run, 'sync', 'warning', { message: syncError.message });
@@ -204,8 +224,12 @@ export async function patchCommand({ cwd = process.cwd() } = {}) {
     await runPhase('Preparing git changes...', 'Git changes prepared', async () => {
       branchName = await resolveBranchName(tempDir, branchPrefix, dateStamp);
       await createBranch(tempDir, branchName);
+      const addedConfig = await ensureBridgeConfigTracked(tempDir, config);
       await stageAll(tempDir);
-      await logPhase(run, 'prepare_git', 'success', { branchName });
+      await logPhase(run, 'prepare_git', 'success', {
+        branchName,
+        addedConfig
+      });
     });
 
     if (!(await hasStagedChanges(tempDir))) {
@@ -240,6 +264,7 @@ export async function patchCommand({ cwd = process.cwd() } = {}) {
     status = 'pushed';
     await logRunEnd(run, 'pushed', {
       branchName,
+      baseBranch,
       compareUrl,
       changedFilesCount
     });
@@ -270,6 +295,7 @@ export async function patchCommand({ cwd = process.cwd() } = {}) {
       printSummary(
         [
           'Bridge complete.',
+          baseBranch ? `Base: ${baseBranch}` : 'Base: (local snapshot)',
           `Branch: ${branchName}`,
           `Files changed: ${changedFilesCount}`,
           compareUrl ? `Compare: ${compareUrl}` : 'Compare URL unavailable.',
@@ -283,6 +309,7 @@ export async function patchCommand({ cwd = process.cwd() } = {}) {
       printSummary(
         [
           'Bridge complete.',
+          baseBranch ? `Base: ${baseBranch}` : 'Base: (local snapshot)',
           `Branch: ${branchName}`,
           'All dependencies are already up to date.'
         ],

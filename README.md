@@ -50,6 +50,7 @@ Auto-detection before prompts:
 Runs the patch engine end-to-end:
 - Copy to temp dir
 - Clean the copied repo snapshot and fast-forward from origin when available
+- Anchor patching to origin's default branch (typically `main`/`master`)
 - Clean/install/update/reinstall using config commands
 - Run optional scripts
 - Create branch, commit, push
@@ -103,6 +104,9 @@ Optional fields:
 - `beforeScripts`
 - `afterScripts`
 - `branchPrefix` (defaults to `bridge/patch`)
+
+Notes:
+- If `bridge.config.json` is not tracked yet, Bridge will include it in the patch commit automatically.
 
 ## Config Examples
 
