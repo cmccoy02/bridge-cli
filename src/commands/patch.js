@@ -5,13 +5,14 @@ import path from 'node:path';
 import { DEFAULT_BRANCH_PREFIX } from '../constants.js';
 import { formatConfig, loadConfig } from '../core/configReader.js';
 import {
+  getActivityLogPath,
   logPhase,
   logRunEnd,
   logRunFailure,
   logRunStart,
   makeRunContext
 } from '../core/activityLogger.js';
-import { CommandExecutionError, runCommand, runCommands } from '../core/executor.js';
+import { CommandExecutionError, runCommand } from '../core/executor.js';
 import {
   commitChanges,
   createBranch,
@@ -42,6 +43,48 @@ function sanitizeSegment(value) {
     .replace(/^-+|-+$/g, '');
 
   return normalized || 'repo';
+}
+
+function formatDuration(ms) {
+  if (!Number.isFinite(ms) || ms < 0) {
+    return '0ms';
+  }
+
+  if (ms < 1000) {
+    return `${ms}ms`;
+  }
+
+  const totalSeconds = ms / 1000;
+
+  if (totalSeconds < 60) {
+    return `${totalSeconds.toFixed(1)}s`;
+  }
+
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = (totalSeconds % 60).toFixed(1);
+  return `${minutes}m ${seconds}s`;
+}
+
+function shortSha(sha) {
+  if (!sha) {
+    return '(unknown)';
+  }
+
+  return sha.slice(0, 8);
+}
+
+function normalizeCommandOutput(text, limit = 400) {
+  const trimmed = (text || '').trim();
+
+  if (!trimmed) {
+    return '';
+  }
+
+  if (trimmed.length <= limit) {
+    return trimmed;
+  }
+
+  return `${trimmed.slice(0, limit)}\n... [truncated]`;
 }
 
 function shouldExcludeFromCopy(sourcePath) {
@@ -76,45 +119,97 @@ async function copyToIsolatedWorkspace(sourceDir, destinationDir) {
   });
 }
 
-async function runPhase(spinnerText, successText, task) {
+async function runPhase({
+  run,
+  phase,
+  spinnerText,
+  successText,
+  task,
+  meta = {}
+}) {
+  const startedAt = Date.now();
   const spinner = createSpinner(spinnerText).start();
 
   try {
     const result = await task();
+    const durationMs = Date.now() - startedAt;
     spinner.stop();
-    success(successText);
+    success(`${successText} (${formatDuration(durationMs)})`);
+    await logPhase(run, phase, 'success', {
+      durationMs,
+      ...meta
+    });
     return result;
   } catch (phaseError) {
+    const durationMs = Date.now() - startedAt;
     spinner.fail(spinnerText);
+    await logPhase(run, phase, 'failed', {
+      durationMs,
+      error: phaseError.message,
+      ...meta
+    });
     throw phaseError;
   }
 }
 
-async function runOptionalScripts(title, scripts, cwd, groupName) {
+async function runCommandList({
+  run,
+  phase,
+  title,
+  commands,
+  cwd,
+  allowFailure = false,
+  quiet = true
+}) {
+  if (!Array.isArray(commands) || commands.length === 0) {
+    return [];
+  }
+
+  const results = [];
+  line();
+  info(`${title} (${commands.length} command${commands.length === 1 ? '' : 's'})`);
+
+  for (const commandText of commands) {
+    command(commandText);
+    const startedAt = Date.now();
+    const result = await runCommand(commandText, { cwd, allowFailure, quiet });
+    const durationMs = Date.now() - startedAt;
+    results.push({ ...result, durationMs });
+
+    if (result.success) {
+      success(`completed (${formatDuration(durationMs)})`);
+    } else {
+      warn(`failed but continuing (${formatDuration(durationMs)})`);
+    }
+
+    const output = normalizeCommandOutput(result.stderr || result.stdout);
+
+    if (!result.success && output) {
+      line(output);
+    }
+  }
+
+  await logPhase(run, phase, 'success', {
+    commandCount: commands.length,
+    allowFailure
+  });
+
+  return results;
+}
+
+async function runOptionalScripts(run, title, scripts, cwd, groupName) {
   if (!Array.isArray(scripts) || scripts.length === 0) {
     return;
   }
-
-  line();
-  info(title);
-
-  for (const script of scripts) {
-    const spinner = createSpinner(script).start();
-    const result = await runCommand(script, { cwd, allowFailure: true, quiet: true });
-
-    if (result.success) {
-      spinner.stop();
-      success(`${groupName}: ${script}`);
-      continue;
-    }
-
-    spinner.stop();
-    warn(`${groupName} failed but patch will continue: ${script}`);
-
-    if (result.stderr.trim()) {
-      line(result.stderr.trim());
-    }
-  }
+  await runCommandList({
+    run,
+    phase: groupName,
+    title,
+    commands: scripts,
+    cwd,
+    allowFailure: true,
+    quiet: true
+  });
 }
 
 async function ensureBridgeConfigTracked(tempDir, config) {
@@ -153,6 +248,10 @@ export async function patchCommand({ cwd = process.cwd() } = {}) {
   });
 
   printBanner();
+  info(`Config: ${configPath}`);
+  info(`Package manager: ${config.packageManager}`);
+  info(`Log file: ${getActivityLogPath()}`);
+  line();
 
   const repoName = config.name || path.basename(cwd);
   const tempDir = path.join(os.tmpdir(), `bridge-${sanitizeSegment(repoName)}-${Date.now()}`);
@@ -166,76 +265,150 @@ export async function patchCommand({ cwd = process.cwd() } = {}) {
   let baseBranch = '';
 
   try {
-    await runPhase('Copying repository...', 'Copied to isolated environment', async () => {
-      await copyToIsolatedWorkspace(cwd, tempDir);
-      await logPhase(run, 'copy', 'success', { tempDir });
+    await runPhase({
+      run,
+      phase: 'copy',
+      spinnerText: 'Copying repository...',
+      successText: 'Copied to isolated environment',
+      meta: { tempDir },
+      task: async () => {
+        await copyToIsolatedWorkspace(cwd, tempDir);
+      }
     });
+    info(`Isolated workspace: ${tempDir}`);
 
-    await runPhase('Syncing with origin...', 'Fetched latest remote state', async () => {
-      try {
-        const syncResult = await refreshFromOrigin(tempDir, { cleanLocal: true });
-        baseBranch = syncResult.branch || '';
+    let syncResult;
+    try {
+      syncResult = await runPhase({
+        run,
+        phase: 'sync',
+        spinnerText: 'Syncing with origin...',
+        successText: 'Fetched latest remote state',
+        task: async () => {
+          const result = await refreshFromOrigin(tempDir, { cleanLocal: true });
+          baseBranch = result.branch || '';
 
-        const configFileName = path.basename(configPath);
-        const sourceConfigPath = path.join(cwd, configFileName);
-        const copiedConfigPath = path.join(tempDir, configFileName);
+          const configFileName = path.basename(configPath);
+          const sourceConfigPath = path.join(cwd, configFileName);
+          const copiedConfigPath = path.join(tempDir, configFileName);
 
-        if (await fileExists(sourceConfigPath)) {
-          await fs.copyFile(sourceConfigPath, copiedConfigPath);
+          if (await fileExists(sourceConfigPath)) {
+            await fs.copyFile(sourceConfigPath, copiedConfigPath);
+          }
+
+          return result;
         }
-
-        await logPhase(run, 'sync', 'success', {
-          baseBranch
-        });
-      } catch (syncError) {
-        warn(`Could not fast-forward to origin. Continuing with local snapshot: ${syncError.message}`);
-        await logPhase(run, 'sync', 'warning', { message: syncError.message });
-      }
-    });
-
-    await runPhase('Running clean commands...', 'Cleaned dependency artifacts', async () => {
-      await runCommands(config.cleanCommands, { cwd: tempDir, quiet: true });
-      await logPhase(run, 'clean', 'success');
-    });
-
-    await runPhase('Running install command...', 'Fresh install complete', async () => {
-      await runCommand(config.installCommand, { cwd: tempDir, quiet: true });
-      await logPhase(run, 'install', 'success');
-    });
-
-    await runPhase(
-      'Running update command...',
-      'Dependencies updated to latest non-breaking versions',
-      async () => {
-        await runCommand(config.updateCommand, { cwd: tempDir, quiet: true });
-        await logPhase(run, 'update', 'success');
-      }
-    );
-
-    await runPhase('Regenerating lockfile...', 'Clean lockfile generated', async () => {
-      await runCommands(config.cleanCommands, { cwd: tempDir, quiet: true });
-      await runCommand(config.installCommand, { cwd: tempDir, quiet: true });
-      await logPhase(run, 'reinstall', 'success');
-    });
-
-    await runOptionalScripts('Running before scripts...', config.beforeScripts, tempDir, 'beforeScripts');
-    await runOptionalScripts('Running after scripts...', config.afterScripts, tempDir, 'afterScripts');
-
-    await runPhase('Preparing git changes...', 'Git changes prepared', async () => {
-      branchName = await resolveBranchName(tempDir, branchPrefix, dateStamp);
-      await createBranch(tempDir, branchName);
-      const addedConfig = await ensureBridgeConfigTracked(tempDir, config);
-      await stageAll(tempDir);
-      await logPhase(run, 'prepare_git', 'success', {
-        branchName,
-        addedConfig
       });
+    } catch (syncError) {
+      warn(`Could not fast-forward to origin. Continuing with local snapshot: ${syncError.message}`);
+      await logPhase(run, 'sync', 'warning', { message: syncError.message });
+      syncResult = {
+        hasOrigin: false,
+        branch: '',
+        beforeSha: '',
+        afterSha: '',
+        advancedBy: 0
+      };
+    }
+
+    if (syncResult.hasOrigin) {
+      const branchLabel = syncResult.branch || '(unknown)';
+      info(
+        `Base branch: ${branchLabel} | ${shortSha(syncResult.beforeSha)} -> ${shortSha(syncResult.afterSha)}`
+      );
+      if (syncResult.advancedBy > 0) {
+        info(`Remote sync advanced ${syncResult.advancedBy} commit(s).`);
+      } else if (syncResult.beforeSha === syncResult.afterSha) {
+        info('Remote sync did not advance commits.');
+      }
+    } else {
+      warn('No origin remote found; running against local snapshot.');
+    }
+
+    await runCommandList({
+      run,
+      phase: 'clean',
+      title: 'Running clean commands',
+      commands: config.cleanCommands,
+      cwd: tempDir,
+      allowFailure: false,
+      quiet: true
     });
+
+    const installResult = await runPhase({
+      run,
+      phase: 'install',
+      spinnerText: 'Running install command...',
+      successText: 'Fresh install complete',
+      task: async () =>
+        runCommand(config.installCommand, {
+          cwd: tempDir,
+          quiet: true
+        }),
+      meta: { command: config.installCommand }
+    });
+    line(normalizeCommandOutput(installResult.stdout, 220) || 'Install output: (no stdout)');
+
+    const updateResult = await runPhase({
+      run,
+      phase: 'update',
+      spinnerText: 'Running update command...',
+      successText: 'Dependencies updated to latest non-breaking versions',
+      task: async () =>
+        runCommand(config.updateCommand, {
+          cwd: tempDir,
+          quiet: true
+        }),
+      meta: { command: config.updateCommand }
+    });
+    line(normalizeCommandOutput(updateResult.stdout, 220) || 'Update output: (no stdout)');
+
+    await runPhase({
+      run,
+      phase: 'reinstall',
+      spinnerText: 'Regenerating lockfile...',
+      successText: 'Clean lockfile generated',
+      task: async () => {
+        await runCommandList({
+          run,
+          phase: 'reinstall_clean',
+          title: 'Reinstall clean commands',
+          commands: config.cleanCommands,
+          cwd: tempDir,
+          allowFailure: false,
+          quiet: true
+        });
+
+        return runCommand(config.installCommand, { cwd: tempDir, quiet: true });
+      },
+      meta: { command: config.installCommand }
+    });
+
+    await runOptionalScripts(run, 'Running before scripts...', config.beforeScripts, tempDir, 'beforeScripts');
+    await runOptionalScripts(run, 'Running after scripts...', config.afterScripts, tempDir, 'afterScripts');
+
+    const gitPrepResult = await runPhase({
+      run,
+      phase: 'prepare_git',
+      spinnerText: 'Preparing git changes...',
+      successText: 'Git changes prepared',
+      task: async () => {
+        branchName = await resolveBranchName(tempDir, branchPrefix, dateStamp);
+        await createBranch(tempDir, branchName);
+        const addedConfig = await ensureBridgeConfigTracked(tempDir, config);
+        await stageAll(tempDir);
+        return { addedConfig };
+      }
+    });
+    info(`Patch branch: ${branchName}`);
+    if (gitPrepResult?.addedConfig) {
+      info('Added bridge.config.json to patch branch because it was not tracked.');
+    }
 
     if (!(await hasStagedChanges(tempDir))) {
       success('All dependencies are already up to date. Nothing to patch.');
       status = 'up_to_date';
-      await logRunEnd(run, 'up_to_date', { branchName });
+      await logRunEnd(run, 'up_to_date', { branchName, baseBranch });
       return true;
     }
 
@@ -243,15 +416,27 @@ export async function patchCommand({ cwd = process.cwd() } = {}) {
       cwd: tempDir,
       quiet: true
     });
-    changedFilesCount = stagedFilesResult.stdout
+    const stagedFiles = stagedFilesResult.stdout
       .split('\n')
       .map((line) => line.trim())
-      .filter(Boolean).length;
+      .filter(Boolean);
+    changedFilesCount = stagedFiles.length;
 
-    await runPhase('Committing and pushing branch...', 'PR branch pushed. Open your repo to create the pull request.', async () => {
-      await commitChanges(tempDir, 'bridge: update dependencies (non-breaking)');
-      await pushBranch(tempDir, branchName);
-      await logPhase(run, 'push', 'success', { branchName });
+    info(`Staged files (${changedFilesCount}):`);
+    for (const stagedFile of stagedFiles) {
+      line(`  - ${stagedFile}`);
+    }
+
+    await runPhase({
+      run,
+      phase: 'push',
+      spinnerText: 'Committing and pushing branch...',
+      successText: 'PR branch pushed. Open your repo to create the pull request.',
+      task: async () => {
+        await commitChanges(tempDir, 'bridge: update dependencies (non-breaking)');
+        await pushBranch(tempDir, branchName);
+      },
+      meta: { branchName }
     });
 
     const originUrl = await getOriginUrl(tempDir);
@@ -287,6 +472,7 @@ export async function patchCommand({ cwd = process.cwd() } = {}) {
   } finally {
     try {
       await fs.rm(tempDir, { recursive: true, force: true });
+      info(`Cleaned isolated workspace: ${tempDir}`);
     } catch (cleanupError) {
       warn(`Failed to delete temp directory: ${cleanupError.message}`);
     }

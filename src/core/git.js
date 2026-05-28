@@ -4,6 +4,27 @@ function getGit(cwd) {
   return simpleGit({ baseDir: cwd });
 }
 
+async function getHeadSha(git) {
+  try {
+    return (await git.revparse(['--short', 'HEAD'])).trim();
+  } catch {
+    return '';
+  }
+}
+
+async function getCommitDistance(git, from, to) {
+  if (!from || !to || from === to) {
+    return 0;
+  }
+
+  try {
+    const count = (await git.raw(['rev-list', '--count', `${from}..${to}`])).trim();
+    return Number.parseInt(count, 10) || 0;
+  } catch {
+    return 0;
+  }
+}
+
 export async function cloneRepository(repoUrl, destination) {
   const git = simpleGit();
   await git.clone(repoUrl, destination, ['--depth', '1']);
@@ -105,8 +126,17 @@ export async function refreshFromOrigin(cwd, { cleanLocal = false } = {}) {
   const hasOrigin = remotes.some((remote) => remote.name === 'origin');
 
   if (!hasOrigin) {
-    return { hasOrigin: false, updated: false, branch: '' };
+    return {
+      hasOrigin: false,
+      updated: false,
+      branch: '',
+      beforeSha: await getHeadSha(git),
+      afterSha: await getHeadSha(git),
+      advancedBy: 0
+    };
   }
+
+  const beforeSha = await getHeadSha(git);
 
   if (cleanLocal) {
     await cleanWorkingTree(cwd);
@@ -116,11 +146,29 @@ export async function refreshFromOrigin(cwd, { cleanLocal = false } = {}) {
   const branch = await detectDefaultBaseBranch(git);
 
   if (!branch) {
-    return { hasOrigin: true, updated: true, branch: '' };
+    const afterShaWithoutBranch = await getHeadSha(git);
+
+    return {
+      hasOrigin: true,
+      updated: true,
+      branch: '',
+      beforeSha,
+      afterSha: afterShaWithoutBranch,
+      advancedBy: await getCommitDistance(git, beforeSha, afterShaWithoutBranch)
+    };
   }
 
   await git.checkout(['-B', branch, `origin/${branch}`]);
-  return { hasOrigin: true, updated: true, branch };
+  const afterSha = await getHeadSha(git);
+
+  return {
+    hasOrigin: true,
+    updated: true,
+    branch,
+    beforeSha,
+    afterSha,
+    advancedBy: await getCommitDistance(git, beforeSha, afterSha)
+  };
 }
 
 export async function remoteBranchExists(cwd, branchName) {

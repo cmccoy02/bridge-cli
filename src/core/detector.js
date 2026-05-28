@@ -84,11 +84,13 @@ async function detectPackageManagerByLockfiles(cwd) {
     }
   }
 
-  if (matches.size === 1) {
-    return [...matches][0];
+  const managers = [...matches];
+
+  if (managers.length === 1) {
+    return { manager: managers[0], managers };
   }
 
-  return null;
+  return { manager: null, managers };
 }
 
 async function readGitOriginFromCommand(cwd) {
@@ -203,8 +205,30 @@ async function readPackageName(cwd) {
   }
 }
 
+async function readPackageManagerFromPackageJson(cwd) {
+  const packageJsonPath = path.join(cwd, 'package.json');
+
+  try {
+    const content = await fs.readFile(packageJsonPath, 'utf8');
+    const parsed = JSON.parse(content);
+    const raw = typeof parsed.packageManager === 'string' ? parsed.packageManager.trim() : '';
+
+    if (!raw) {
+      return '';
+    }
+
+    const manager = raw.split('@')[0].trim();
+    return PACKAGE_MANAGER_PRESETS[manager] ? manager : '';
+  } catch {
+    return '';
+  }
+}
+
 export async function detectProject(cwd = process.cwd()) {
-  const packageManager = await detectPackageManagerByLockfiles(cwd);
+  const packageJsonManager = await readPackageManagerFromPackageJson(cwd);
+  const lockfileDetection = await detectPackageManagerByLockfiles(cwd);
+  const lockfileManager = lockfileDetection.manager;
+  const lockfileManagers = lockfileDetection.managers;
   const repoUrl = await readOriginUrl(cwd);
   const packageName = await readPackageName(cwd);
   const gitConfiguredRepoUrl = await readGitConfigValue(cwd, 'remote.origin.url');
@@ -216,16 +240,37 @@ export async function detectProject(cwd = process.cwd()) {
   const hasMixExs = await fileExists(path.join(cwd, 'mix.exs'));
 
   const fallbackManager = hasRequirements ? 'pip' : hasMixExs ? 'mix' : null;
-  const resolvedPackageManager = packageManager || fallbackManager;
+  const resolvedPackageManager =
+    packageJsonManager || lockfileManager || fallbackManager;
+  const detectionSource = packageJsonManager
+    ? 'package.json#packageManager'
+    : lockfileManager
+      ? 'lockfile'
+      : fallbackManager
+        ? 'language_fallback'
+        : '';
 
-  const detectedMessage = resolvedPackageManager
-    ? `We detected a ${PACKAGE_MANAGER_PRESETS[resolvedPackageManager].label}.`
-    : 'We could not auto-detect a package manager, so you can choose one.';
+  let detectedMessage = 'We could not auto-detect a package manager, so you can choose one.';
+
+  if (resolvedPackageManager) {
+    const sourceDetail =
+      detectionSource === 'package.json#packageManager'
+        ? 'from package.json packageManager'
+        : detectionSource === 'lockfile'
+          ? 'from lockfiles'
+          : 'from project files';
+
+    detectedMessage = `We detected a ${PACKAGE_MANAGER_PRESETS[resolvedPackageManager].label} ${sourceDetail}.`;
+  } else if (lockfileManagers.length > 1) {
+    detectedMessage = `We found multiple lockfiles (${lockfileManagers.join(', ')}), so choose the package manager to use.`;
+  }
 
   return {
     packageManager: resolvedPackageManager,
     repoUrl: fallbackRepoUrl,
     name,
-    detectedMessage
+    detectedMessage,
+    detectionSource,
+    detectedLockfileManagers: lockfileManagers
   };
 }
