@@ -31,6 +31,25 @@ function normalizeArray(value) {
     .filter((entry) => entry.length > 0);
 }
 
+function normalizeScope(scope) {
+  if (!scope || typeof scope !== 'object' || Array.isArray(scope)) {
+    return null;
+  }
+
+  return {
+    path: typeof scope.path === 'string' ? scope.path.trim() : '',
+    packageManager:
+      typeof scope.packageManager === 'string' ? scope.packageManager.trim() : '',
+    installCommand:
+      typeof scope.installCommand === 'string' ? scope.installCommand.trim() : '',
+    updateCommand:
+      typeof scope.updateCommand === 'string' ? scope.updateCommand.trim() : '',
+    cleanCommands: normalizeArray(scope.cleanCommands),
+    beforeScripts: normalizeArray(scope.beforeScripts),
+    afterScripts: normalizeArray(scope.afterScripts)
+  };
+}
+
 function findMissingFields(config) {
   const missing = [];
 
@@ -71,10 +90,43 @@ function findShapeIssues(config) {
     issues.push('afterScripts must be an array of shell commands');
   }
 
+  if ('scopes' in config) {
+    if (!Array.isArray(config.scopes)) {
+      issues.push('scopes must be an array');
+    } else {
+      config.scopes.forEach((scope, index) => {
+        if (!scope || typeof scope !== 'object' || Array.isArray(scope)) {
+          issues.push(`scopes[${index}] must be an object`);
+          return;
+        }
+
+        if (isBlankString(scope.path)) {
+          issues.push(`scopes[${index}].path is required`);
+        }
+
+        if (isBlankString(scope.installCommand)) {
+          issues.push(`scopes[${index}].installCommand is required`);
+        }
+
+        if (isBlankString(scope.updateCommand)) {
+          issues.push(`scopes[${index}].updateCommand is required`);
+        }
+
+        if (!Array.isArray(scope.cleanCommands) || scope.cleanCommands.length === 0) {
+          issues.push(`scopes[${index}].cleanCommands must be a non-empty array`);
+        }
+      });
+    }
+  }
+
   return issues;
 }
 
 export function normalizeConfig(config) {
+  const scopes = Array.isArray(config.scopes)
+    ? config.scopes.map((scope) => normalizeScope(scope)).filter(Boolean)
+    : [];
+
   return {
     ...config,
     name: typeof config.name === 'string' ? config.name.trim() : '',
@@ -88,6 +140,7 @@ export function normalizeConfig(config) {
     cleanCommands: normalizeArray(config.cleanCommands),
     beforeScripts: normalizeArray(config.beforeScripts),
     afterScripts: normalizeArray(config.afterScripts),
+    scopes,
     branchPrefix:
       typeof config.branchPrefix === 'string' && config.branchPrefix.trim()
         ? config.branchPrefix.trim()

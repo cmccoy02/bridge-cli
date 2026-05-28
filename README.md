@@ -38,6 +38,7 @@ bridge patch
 Interactive onboarding that creates `bridge.config.json` in the current directory.
 
 Auto-detection before prompts:
+- `package.json` `packageManager` -> `npm`/`yarn`/`pnpm` (highest priority)
 - `package-lock.json` -> `npm`
 - `yarn.lock` -> `yarn`
 - `pnpm-lock.yaml` -> `pnpm`
@@ -104,6 +105,7 @@ Optional fields:
 - `beforeScripts`
 - `afterScripts`
 - `branchPrefix` (defaults to `bridge/patch`)
+- `scopes` (additional nested directories to patch in the same run)
 
 Notes:
 - If `bridge.config.json` is not tracked yet, Bridge will include it in the patch commit automatically.
@@ -126,9 +128,9 @@ Notes:
 ```json
 {
   "packageManager": "pip",
-  "installCommand": "pip install -r requirements.txt",
-  "updateCommand": "pip install --upgrade -r requirements.txt",
-  "cleanCommands": ["rm -rf venv", "python -m venv venv"]
+  "installCommand": ".bridge-venv/bin/python -m pip install --upgrade pip && .bridge-venv/bin/python -m pip install -r requirements.txt",
+  "updateCommand": ".bridge-venv/bin/python -m pip install --upgrade -r requirements.txt && .bridge-venv/bin/python -m pip freeze --exclude-editable | grep -Ev \"^(pip|setuptools|wheel)==\" > requirements.txt",
+  "cleanCommands": ["rm -rf .bridge-venv", "python3 -m venv .bridge-venv"]
 }
 ```
 
@@ -139,7 +141,27 @@ Notes:
   "packageManager": "mix",
   "installCommand": "mix deps.get",
   "updateCommand": "mix deps.update --all",
-  "cleanCommands": ["rm -rf deps", "rm -rf _build"]
+  "cleanCommands": ["rm -rf deps", "rm -rf _build", "rm -f mix.lock"]
+}
+```
+
+### Nested Python Scope Inside a TypeScript Repo
+
+```json
+{
+  "packageManager": "pnpm",
+  "installCommand": "pnpm install",
+  "updateCommand": "pnpm update",
+  "cleanCommands": ["rm -rf node_modules", "rm -f pnpm-lock.yaml"],
+  "scopes": [
+    {
+      "path": "deploy/description_bot",
+      "packageManager": "pip",
+      "installCommand": ".bridge-venv/bin/python -m pip install --upgrade pip && .bridge-venv/bin/python -m pip install -r requirements.txt",
+      "updateCommand": ".bridge-venv/bin/python -m pip install --upgrade -r requirements.txt && .bridge-venv/bin/python -m pip freeze --exclude-editable | grep -Ev \"^(pip|setuptools|wheel)==\" > requirements.txt",
+      "cleanCommands": ["rm -rf .bridge-venv", "python3 -m venv .bridge-venv"]
+    }
+  ]
 }
 ```
 

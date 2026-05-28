@@ -29,15 +29,17 @@ export const PACKAGE_MANAGER_PRESETS = {
   },
   pip: {
     label: 'Python project using pip',
-    installCommand: 'pip install -r requirements.txt',
-    updateCommand: 'pip install --upgrade -r requirements.txt',
-    cleanCommands: ['rm -rf venv', 'python -m venv venv']
+    installCommand:
+      '.bridge-venv/bin/python -m pip install --upgrade pip && .bridge-venv/bin/python -m pip install -r requirements.txt',
+    updateCommand:
+      '.bridge-venv/bin/python -m pip install --upgrade -r requirements.txt && .bridge-venv/bin/python -m pip freeze --exclude-editable | grep -Ev "^(pip|setuptools|wheel)==" > requirements.txt',
+    cleanCommands: ['rm -rf .bridge-venv', 'python3 -m venv .bridge-venv']
   },
   mix: {
     label: 'Elixir project using mix',
     installCommand: 'mix deps.get',
     updateCommand: 'mix deps.update --all',
-    cleanCommands: ['rm -rf deps', 'rm -rf _build']
+    cleanCommands: ['rm -rf deps', 'rm -rf _build', 'rm -f mix.lock']
   }
 };
 

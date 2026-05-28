@@ -21,6 +21,26 @@ function quote(value) {
   return `'${String(value).replace(/'/g, `'"'"'`)}'`;
 }
 
+async function ensureBinary(commandString, contextLabel, issues) {
+  const binary = firstToken(commandString);
+
+  if (!binary) {
+    return;
+  }
+
+  if (!(await commandExists(binary))) {
+    issues.push(`${binary} is not available in PATH (${contextLabel})`);
+  }
+}
+
+function commandList(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter((entry) => typeof entry === 'string' && entry.trim().length > 0);
+}
+
 export async function validateCommand({ cwd = process.cwd(), offline = false } = {}) {
   const run = makeRunContext('validate', cwd);
   await logRunStart(run, { offline });
@@ -36,8 +56,6 @@ export async function validateCommand({ cwd = process.cwd(), offline = false } =
 
   if (config) {
     const managerBinary = firstToken(config.packageManager);
-    const installBinary = firstToken(config.installCommand);
-    const updateBinary = firstToken(config.updateCommand);
 
     if (!(await commandExists('git'))) {
       issues.push('git is not available in PATH');
@@ -47,12 +65,39 @@ export async function validateCommand({ cwd = process.cwd(), offline = false } =
       issues.push(`${managerBinary} is not available in PATH`);
     }
 
-    if (installBinary && !(await commandExists(installBinary))) {
-      issues.push(`${installBinary} is not available in PATH (installCommand)`);
+    await ensureBinary(config.installCommand, 'installCommand', issues);
+    await ensureBinary(config.updateCommand, 'updateCommand', issues);
+
+    for (const cleanCommand of commandList(config.cleanCommands)) {
+      await ensureBinary(cleanCommand, 'cleanCommands', issues);
     }
 
-    if (updateBinary && !(await commandExists(updateBinary))) {
-      issues.push(`${updateBinary} is not available in PATH (updateCommand)`);
+    for (const beforeScript of commandList(config.beforeScripts)) {
+      await ensureBinary(beforeScript, 'beforeScripts', issues);
+    }
+
+    for (const afterScript of commandList(config.afterScripts)) {
+      await ensureBinary(afterScript, 'afterScripts', issues);
+    }
+
+    if (Array.isArray(config.scopes)) {
+      for (const scope of config.scopes) {
+        const scopeName = scope.path || '.';
+        await ensureBinary(scope.installCommand, `scopes(${scopeName}).installCommand`, issues);
+        await ensureBinary(scope.updateCommand, `scopes(${scopeName}).updateCommand`, issues);
+
+        for (const scopeCleanCommand of commandList(scope.cleanCommands)) {
+          await ensureBinary(scopeCleanCommand, `scopes(${scopeName}).cleanCommands`, issues);
+        }
+
+        for (const scopeBeforeScript of commandList(scope.beforeScripts)) {
+          await ensureBinary(scopeBeforeScript, `scopes(${scopeName}).beforeScripts`, issues);
+        }
+
+        for (const scopeAfterScript of commandList(scope.afterScripts)) {
+          await ensureBinary(scopeAfterScript, `scopes(${scopeName}).afterScripts`, issues);
+        }
+      }
     }
 
     if (!offline) {

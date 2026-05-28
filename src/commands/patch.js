@@ -87,6 +87,50 @@ function normalizeCommandOutput(text, limit = 400) {
   return `${trimmed.slice(0, limit)}\n... [truncated]`;
 }
 
+function normalizePhaseMeta(meta = {}) {
+  const normalized = { ...meta };
+
+  if ('command' in normalized && !('phaseCommand' in normalized)) {
+    normalized.phaseCommand = normalized.command;
+    delete normalized.command;
+  }
+
+  return normalized;
+}
+
+function normalizeScopePath(rawPath) {
+  if (typeof rawPath !== 'string' || rawPath.trim() === '' || rawPath.trim() === '.') {
+    return '.';
+  }
+
+  return rawPath.trim().replace(/^\.\/+/, '').replace(/\/+$/, '') || '.';
+}
+
+function scopeLabel(scopePath) {
+  return scopePath === '.' ? 'root' : scopePath;
+}
+
+function buildPatchScopes(config) {
+  const rootScope = {
+    path: '.',
+    packageManager: config.packageManager || '',
+    installCommand: config.installCommand,
+    updateCommand: config.updateCommand,
+    cleanCommands: Array.isArray(config.cleanCommands) ? config.cleanCommands : [],
+    beforeScripts: Array.isArray(config.beforeScripts) ? config.beforeScripts : [],
+    afterScripts: Array.isArray(config.afterScripts) ? config.afterScripts : []
+  };
+
+  const nestedScopes = Array.isArray(config.scopes)
+    ? config.scopes.map((scope) => ({
+        ...scope,
+        path: normalizeScopePath(scope.path)
+      }))
+    : [];
+
+  return [rootScope, ...nestedScopes];
+}
+
 function shouldExcludeFromCopy(sourcePath) {
   const name = path.basename(sourcePath);
   return name === 'node_modules' || name === '.venv' || name === 'venv';
@@ -137,7 +181,7 @@ async function runPhase({
     success(`${successText} (${formatDuration(durationMs)})`);
     await logPhase(run, phase, 'success', {
       durationMs,
-      ...meta
+      ...normalizePhaseMeta(meta)
     });
     return result;
   } catch (phaseError) {
@@ -146,7 +190,7 @@ async function runPhase({
     await logPhase(run, phase, 'failed', {
       durationMs,
       error: phaseError.message,
-      ...meta
+      ...normalizePhaseMeta(meta)
     });
     throw phaseError;
   }
@@ -210,6 +254,101 @@ async function runOptionalScripts(run, title, scripts, cwd, groupName) {
     allowFailure: true,
     quiet: true
   });
+}
+
+async function runScopeWorkflow({ run, tempDir, scope }) {
+  const relativePath = normalizeScopePath(scope.path);
+  const label = scopeLabel(relativePath);
+  const scopeDir = relativePath === '.' ? tempDir : path.join(tempDir, relativePath);
+
+  if (!(await fileExists(scopeDir))) {
+    throw new Error(`Scope path does not exist: ${relativePath}`);
+  }
+
+  line();
+  info(`Scope: ${label}`);
+  if (scope.packageManager) {
+    info(`Scope manager: ${scope.packageManager}`);
+  }
+  if (relativePath !== '.' && (await fileExists(path.join(scopeDir, '.git')))) {
+    warn(
+      `Nested git metadata detected in ${relativePath}. Bridge will run commands there, but parent commits may only capture submodule pointer changes.`
+    );
+  }
+
+  await runCommandList({
+    run,
+    phase: `clean:${label}`,
+    title: 'Running clean commands',
+    commands: scope.cleanCommands,
+    cwd: scopeDir,
+    allowFailure: false,
+    quiet: true
+  });
+
+  const installResult = await runPhase({
+    run,
+    phase: `install:${label}`,
+    spinnerText: `Running install command (${label})...`,
+    successText: 'Fresh install complete',
+    task: async () =>
+      runCommand(scope.installCommand, {
+        cwd: scopeDir,
+        quiet: true
+      }),
+    meta: { command: scope.installCommand, scope: label }
+  });
+  line(normalizeCommandOutput(installResult.stdout, 220) || 'Install output: (no stdout)');
+
+  const updateResult = await runPhase({
+    run,
+    phase: `update:${label}`,
+    spinnerText: `Running update command (${label})...`,
+    successText: 'Dependencies updated to latest non-breaking versions',
+    task: async () =>
+      runCommand(scope.updateCommand, {
+        cwd: scopeDir,
+        quiet: true
+      }),
+    meta: { command: scope.updateCommand, scope: label }
+  });
+  line(normalizeCommandOutput(updateResult.stdout, 220) || 'Update output: (no stdout)');
+
+  await runPhase({
+    run,
+    phase: `reinstall:${label}`,
+    spinnerText: `Regenerating lockfile (${label})...`,
+    successText: 'Clean lockfile generated',
+    task: async () => {
+      await runCommandList({
+        run,
+        phase: `reinstall_clean:${label}`,
+        title: 'Reinstall clean commands',
+        commands: scope.cleanCommands,
+        cwd: scopeDir,
+        allowFailure: false,
+        quiet: true
+      });
+
+      return runCommand(scope.installCommand, { cwd: scopeDir, quiet: true });
+    },
+    meta: { command: scope.installCommand, scope: label }
+  });
+
+  await runOptionalScripts(
+    run,
+    `Running before scripts (${label})...`,
+    scope.beforeScripts,
+    scopeDir,
+    `beforeScripts:${label}`
+  );
+  await runOptionalScripts(
+    run,
+    `Running after scripts (${label})...`,
+    scope.afterScripts,
+    scopeDir,
+    `afterScripts:${label}`
+  );
 }
 
 async function ensureBridgeConfigTracked(tempDir, config) {
@@ -325,67 +464,16 @@ export async function patchCommand({ cwd = process.cwd() } = {}) {
       warn('No origin remote found; running against local snapshot.');
     }
 
-    await runCommandList({
-      run,
-      phase: 'clean',
-      title: 'Running clean commands',
-      commands: config.cleanCommands,
-      cwd: tempDir,
-      allowFailure: false,
-      quiet: true
-    });
+    const scopes = buildPatchScopes(config);
+    info(`Update scopes: ${scopes.length}`);
 
-    const installResult = await runPhase({
-      run,
-      phase: 'install',
-      spinnerText: 'Running install command...',
-      successText: 'Fresh install complete',
-      task: async () =>
-        runCommand(config.installCommand, {
-          cwd: tempDir,
-          quiet: true
-        }),
-      meta: { command: config.installCommand }
-    });
-    line(normalizeCommandOutput(installResult.stdout, 220) || 'Install output: (no stdout)');
-
-    const updateResult = await runPhase({
-      run,
-      phase: 'update',
-      spinnerText: 'Running update command...',
-      successText: 'Dependencies updated to latest non-breaking versions',
-      task: async () =>
-        runCommand(config.updateCommand, {
-          cwd: tempDir,
-          quiet: true
-        }),
-      meta: { command: config.updateCommand }
-    });
-    line(normalizeCommandOutput(updateResult.stdout, 220) || 'Update output: (no stdout)');
-
-    await runPhase({
-      run,
-      phase: 'reinstall',
-      spinnerText: 'Regenerating lockfile...',
-      successText: 'Clean lockfile generated',
-      task: async () => {
-        await runCommandList({
-          run,
-          phase: 'reinstall_clean',
-          title: 'Reinstall clean commands',
-          commands: config.cleanCommands,
-          cwd: tempDir,
-          allowFailure: false,
-          quiet: true
-        });
-
-        return runCommand(config.installCommand, { cwd: tempDir, quiet: true });
-      },
-      meta: { command: config.installCommand }
-    });
-
-    await runOptionalScripts(run, 'Running before scripts...', config.beforeScripts, tempDir, 'beforeScripts');
-    await runOptionalScripts(run, 'Running after scripts...', config.afterScripts, tempDir, 'afterScripts');
+    for (const scope of scopes) {
+      await runScopeWorkflow({
+        run,
+        tempDir,
+        scope
+      });
+    }
 
     const gitPrepResult = await runPhase({
       run,
