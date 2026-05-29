@@ -2,10 +2,12 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { DEFAULT_BRANCH_PREFIX } from '../constants.js';
+import { DEFAULT_BRANCH_PREFIX, PACKAGE_MANAGER_PRESETS } from '../constants.js';
 import { formatConfig, loadConfig } from '../core/configReader.js';
 import {
   getActivityLogPath,
+  logDepDelta,
+  logDepDeltaSummary,
   logPhase,
   logRunEnd,
   logRunFailure,
@@ -24,6 +26,12 @@ import {
   resolveBranchName,
   stageAll
 } from '../core/git.js';
+import {
+  computeDepDeltas,
+  createDepDeltaSummary,
+  mergeDepDeltaSummaries,
+  parseDirectDeps
+} from '../core/lockfileDiff.js';
 import { printBanner } from '../ui/banner.js';
 import { command, error, info, line, success, warn } from '../ui/logger.js';
 import { createSpinner } from '../ui/spinner.js';
@@ -145,6 +153,34 @@ async function fileExists(filePath) {
   }
 }
 
+async function readTextFileIfExists(filePath) {
+  try {
+    return await fs.readFile(filePath, 'utf8');
+  } catch (error) {
+    if (error && error.code === 'ENOENT') {
+      return null;
+    }
+
+    throw error;
+  }
+}
+
+function resolveScopePreset(scope) {
+  if (!scope || typeof scope.packageManager !== 'string') {
+    return null;
+  }
+
+  return PACKAGE_MANAGER_PRESETS[scope.packageManager] || null;
+}
+
+function formatDeltaSummaryLine(summary) {
+  if (!summary) {
+    return 'Deltas: 0 direct, 0 transitive (0 patch / 0 minor / 0 major / 0 other)';
+  }
+
+  return `Deltas: ${summary.directChanged} direct, ${summary.transitiveChanged} transitive (${summary.byBump.patch} patch / ${summary.byBump.minor} minor / ${summary.byBump.major} major / ${summary.byBump.other} other)`;
+}
+
 async function copyToIsolatedWorkspace(sourceDir, destinationDir) {
   await fs.cp(sourceDir, destinationDir, {
     recursive: true,
@@ -256,10 +292,20 @@ async function runOptionalScripts(run, title, scripts, cwd, groupName) {
   });
 }
 
-async function runScopeWorkflow({ run, tempDir, scope }) {
+async function runScopeWorkflow({ run, tempDir, scope, repoName }) {
   const relativePath = normalizeScopePath(scope.path);
   const label = scopeLabel(relativePath);
   const scopeDir = relativePath === '.' ? tempDir : path.join(tempDir, relativePath);
+  const scopePreset = resolveScopePreset(scope);
+  const lockfile = scope.lockfile || scopePreset?.lockfile || null;
+  const lockfileFormat = scope.lockfileFormat || scopePreset?.lockfileFormat || null;
+  const manifest = scope.manifest || scopePreset?.manifest || null;
+  const lockfilePath = lockfile ? path.join(scopeDir, lockfile) : '';
+  const manifestPath = manifest ? path.join(scopeDir, manifest) : '';
+  const hasMetricTarget = Boolean(lockfile && lockfileFormat);
+  let shouldCollectMetrics = hasMetricTarget;
+  let beforeLockfileContent = null;
+  let metricsSummary = createDepDeltaSummary();
 
   if (!(await fileExists(scopeDir))) {
     throw new Error(`Scope path does not exist: ${relativePath}`);
@@ -300,6 +346,19 @@ async function runScopeWorkflow({ run, tempDir, scope }) {
   });
   line(normalizeCommandOutput(installResult.stdout, 220) || 'Install output: (no stdout)');
 
+  if (hasMetricTarget) {
+    try {
+      beforeLockfileContent = await readTextFileIfExists(lockfilePath);
+    } catch (beforeMetricsError) {
+      shouldCollectMetrics = false;
+      await logPhase(run, `metrics:${label}`, 'warning', {
+        scope: label,
+        lockfile,
+        message: `Failed to read lockfile before update; skipping dep delta metrics: ${beforeMetricsError.message}`
+      });
+    }
+  }
+
   const updateResult = await runPhase({
     run,
     phase: `update:${label}`,
@@ -335,6 +394,85 @@ async function runScopeWorkflow({ run, tempDir, scope }) {
     meta: { command: scope.installCommand, scope: label }
   });
 
+  if (shouldCollectMetrics) {
+    if (beforeLockfileContent === null) {
+      await logPhase(run, `metrics:${label}`, 'note', {
+        scope: label,
+        lockfile,
+        message: `Lockfile ${lockfile} was missing before update; skipping dep delta metrics for this scope.`
+      });
+    } else {
+      try {
+        const afterLockfileContent = await readTextFileIfExists(lockfilePath);
+
+        if (afterLockfileContent === null) {
+          await logPhase(run, `metrics:${label}`, 'note', {
+            scope: label,
+            lockfile,
+            message: `Lockfile ${lockfile} is missing after reinstall; skipping dep delta metrics for this scope.`
+          });
+        } else {
+          const manifestWarnings = [];
+          const manifestContent = manifestPath ? await readTextFileIfExists(manifestPath) : null;
+          const directDeps = parseDirectDeps(manifestContent || '', manifest, {
+            onWarning: (warningError) => {
+              manifestWarnings.push(warningError.message);
+            }
+          });
+
+          if (manifestWarnings.length > 0) {
+            await logPhase(run, `metrics:${label}`, 'warning', {
+              scope: label,
+              manifest,
+              message: `Failed to fully parse direct dependencies: ${manifestWarnings[0]}`
+            });
+          }
+
+          const { deltas, summary } = computeDepDeltas({
+            beforeContent: beforeLockfileContent,
+            afterContent: afterLockfileContent,
+            lockfileFormat,
+            directDeps
+          });
+
+          metricsSummary = mergeDepDeltaSummaries(metricsSummary, summary);
+
+          for (const delta of deltas) {
+            await logDepDelta(run, {
+              repo: repoName,
+              manager: scope.packageManager,
+              scope: label,
+              name: delta.name,
+              from: delta.from,
+              to: delta.to,
+              bump: delta.bump,
+              kind: delta.kind,
+              // TODO(v2): causal attribution requires the resolved dependency graph.
+              blastRadius: null,
+              causedBy: null
+            });
+          }
+
+          await logPhase(run, `metrics:${label}`, 'success', {
+            scope: label,
+            lockfile,
+            totalChanged: summary.totalChanged,
+            added: summary.added,
+            removed: summary.removed,
+            directChanged: summary.directChanged,
+            transitiveChanged: summary.transitiveChanged
+          });
+        }
+      } catch (metricsError) {
+        await logPhase(run, `metrics:${label}`, 'warning', {
+          scope: label,
+          lockfile,
+          message: `Dependency delta metrics failed but patch will continue: ${metricsError.message}`
+        });
+      }
+    }
+  }
+
   await runOptionalScripts(
     run,
     `Running before scripts (${label})...`,
@@ -349,6 +487,8 @@ async function runScopeWorkflow({ run, tempDir, scope }) {
     scopeDir,
     `afterScripts:${label}`
   );
+
+  return metricsSummary;
 }
 
 async function ensureBridgeConfigTracked(tempDir, config) {
@@ -393,9 +533,11 @@ export async function patchCommand({ cwd = process.cwd() } = {}) {
   line();
 
   const repoName = config.name || path.basename(cwd);
+  run.repo = repoName;
   const tempDir = path.join(os.tmpdir(), `bridge-${sanitizeSegment(repoName)}-${Date.now()}`);
   const branchPrefix = config.branchPrefix || DEFAULT_BRANCH_PREFIX;
   const dateStamp = getDateStamp();
+  let depDeltaSummary = createDepDeltaSummary();
 
   let branchName = '';
   let compareUrl = '';
@@ -468,12 +610,24 @@ export async function patchCommand({ cwd = process.cwd() } = {}) {
     info(`Update scopes: ${scopes.length}`);
 
     for (const scope of scopes) {
-      await runScopeWorkflow({
+      const scopeSummary = await runScopeWorkflow({
         run,
         tempDir,
-        scope
+        scope,
+        repoName
       });
+      depDeltaSummary = mergeDepDeltaSummaries(depDeltaSummary, scopeSummary);
     }
+
+    await logDepDeltaSummary(run, {
+      repo: repoName,
+      totalChanged: depDeltaSummary.totalChanged,
+      added: depDeltaSummary.added,
+      removed: depDeltaSummary.removed,
+      directChanged: depDeltaSummary.directChanged,
+      transitiveChanged: depDeltaSummary.transitiveChanged,
+      byBump: { ...depDeltaSummary.byBump }
+    });
 
     const gitPrepResult = await runPhase({
       run,
@@ -571,6 +725,7 @@ export async function patchCommand({ cwd = process.cwd() } = {}) {
           'Bridge complete.',
           baseBranch ? `Base: ${baseBranch}` : 'Base: (local snapshot)',
           `Branch: ${branchName}`,
+          formatDeltaSummaryLine(depDeltaSummary),
           `Files changed: ${changedFilesCount}`,
           compareUrl ? `Compare: ${compareUrl}` : 'Compare URL unavailable.',
           'Review your changes and merge when ready.'
@@ -585,6 +740,7 @@ export async function patchCommand({ cwd = process.cwd() } = {}) {
           'Bridge complete.',
           baseBranch ? `Base: ${baseBranch}` : 'Base: (local snapshot)',
           `Branch: ${branchName}`,
+          formatDeltaSummaryLine(depDeltaSummary),
           'All dependencies are already up to date.'
         ],
         'Bridge complete'

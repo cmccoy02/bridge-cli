@@ -7,6 +7,7 @@ import { Command } from 'commander';
 import { configCommand } from '../src/commands/config.js';
 import { initCommand } from '../src/commands/init.js';
 import { patchCommand } from '../src/commands/patch.js';
+import { reportCommand } from '../src/commands/report.js';
 import { validateCommand } from '../src/commands/validate.js';
 import { error } from '../src/ui/logger.js';
 
@@ -59,6 +60,24 @@ program
       await configCommand();
     } catch (configError) {
       error(configError.message);
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command('report')
+  .description('Summarize dependency delta metrics from activity logs')
+  .option('--json', 'Print machine-readable report JSON')
+  .option('--repo <name>', 'Filter metrics to a single repo name')
+  .option('--limit <n>', 'Top-N packages for ranked lists', '10')
+  .action(async (options) => {
+    const ok = await reportCommand({
+      json: options.json,
+      repo: options.repo,
+      limit: options.limit
+    });
+
+    if (!ok) {
       process.exitCode = 1;
     }
   });

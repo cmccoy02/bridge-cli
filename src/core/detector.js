@@ -16,6 +16,14 @@ async function fileExists(filePath) {
   }
 }
 
+async function readTextFileIfExists(filePath) {
+  try {
+    return await fs.readFile(filePath, 'utf8');
+  } catch {
+    return '';
+  }
+}
+
 async function readPackageLock(cwd) {
   const filePath = path.join(cwd, 'package-lock.json');
 
@@ -70,7 +78,7 @@ async function readPnpmLock(cwd) {
   return null;
 }
 
-async function detectPackageManagerByLockfiles(cwd) {
+async function detectJsPackageManagerByLockfiles(cwd) {
   const matches = new Set();
   const lockDetections = await Promise.all([
     readPackageLock(cwd),
@@ -91,6 +99,85 @@ async function detectPackageManagerByLockfiles(cwd) {
   }
 
   return { manager: null, managers };
+}
+
+function hasPoetryTable(pyprojectContent) {
+  return /^\s*\[tool\.poetry(?:\]|\.)/m.test(pyprojectContent);
+}
+
+function hasProjectTable(pyprojectContent) {
+  return /^\s*\[project\]\s*$/m.test(pyprojectContent);
+}
+
+async function detectPythonManager(cwd) {
+  const hasUvLock = await fileExists(path.join(cwd, 'uv.lock'));
+
+  if (hasUvLock) {
+    return {
+      manager: 'uv',
+      source: 'python_lockfile',
+      unsupported: '',
+      detectedMessage: `We detected a ${PACKAGE_MANAGER_PRESETS.uv.label} from lockfiles.`
+    };
+  }
+
+  const pyprojectPath = path.join(cwd, 'pyproject.toml');
+  const pyprojectContent = await readTextFileIfExists(pyprojectPath);
+  const hasPoetryLock = await fileExists(path.join(cwd, 'poetry.lock'));
+
+  if (hasPoetryLock || hasPoetryTable(pyprojectContent)) {
+    return {
+      manager: 'poetry',
+      source: hasPoetryLock ? 'python_lockfile' : 'python_manifest',
+      unsupported: '',
+      detectedMessage: `We detected a ${PACKAGE_MANAGER_PRESETS.poetry.label} from project files.`
+    };
+  }
+
+  if (await fileExists(path.join(cwd, 'Pipfile'))) {
+    return {
+      manager: 'pipenv',
+      source: 'python_manifest',
+      unsupported: '',
+      detectedMessage: `We detected a ${PACKAGE_MANAGER_PRESETS.pipenv.label} from project files.`
+    };
+  }
+
+  if (await fileExists(path.join(cwd, 'requirements.in'))) {
+    return {
+      manager: 'pip-compile',
+      source: 'python_manifest',
+      unsupported: '',
+      detectedMessage: `We detected a ${PACKAGE_MANAGER_PRESETS['pip-compile'].label} from project files.`
+    };
+  }
+
+  if (await fileExists(path.join(cwd, 'requirements.txt'))) {
+    return {
+      manager: null,
+      source: 'unsupported',
+      unsupported: 'bare-requirements',
+      detectedMessage:
+        "Bridge detected a bare requirements.txt project. Bridge can't safely patch bare requirements.txt yet. Add requirements.in + pip-compile (or use poetry/pipenv/uv) and run bridge init again."
+    };
+  }
+
+  if (pyprojectContent && hasProjectTable(pyprojectContent)) {
+    return {
+      manager: null,
+      source: 'unsupported',
+      unsupported: 'pep621-no-lock',
+      detectedMessage:
+        'Bridge detected a PEP 621 pyproject.toml project without a supported lockfile manager (uv/poetry). Add uv.lock or poetry.lock and run bridge init again.'
+    };
+  }
+
+  return {
+    manager: null,
+    source: '',
+    unsupported: '',
+    detectedMessage: ''
+  };
 }
 
 async function readGitOriginFromCommand(cwd) {
@@ -226,9 +313,10 @@ async function readPackageManagerFromPackageJson(cwd) {
 
 export async function detectProject(cwd = process.cwd()) {
   const packageJsonManager = await readPackageManagerFromPackageJson(cwd);
-  const lockfileDetection = await detectPackageManagerByLockfiles(cwd);
-  const lockfileManager = lockfileDetection.manager;
-  const lockfileManagers = lockfileDetection.managers;
+  const jsLockfileDetection = await detectJsPackageManagerByLockfiles(cwd);
+  const pythonDetection = await detectPythonManager(cwd);
+  const lockfileManager = jsLockfileDetection.manager;
+  const lockfileManagers = jsLockfileDetection.managers;
   const repoUrl = await readOriginUrl(cwd);
   const packageName = await readPackageName(cwd);
   const gitConfiguredRepoUrl = await readGitConfigValue(cwd, 'remote.origin.url');
@@ -236,19 +324,26 @@ export async function detectProject(cwd = process.cwd()) {
   const derivedNameFromRemote = deriveNameFromRepoUrl(fallbackRepoUrl);
   const directoryName = path.basename(cwd);
   const name = packageName || derivedNameFromRemote || directoryName;
-  const hasRequirements = await fileExists(path.join(cwd, 'requirements.txt'));
   const hasMixExs = await fileExists(path.join(cwd, 'mix.exs'));
-
-  const fallbackManager = hasRequirements ? 'pip' : hasMixExs ? 'mix' : null;
+  const hasMultipleJsLockfiles = lockfileManagers.length > 1;
+  const fallbackManager = hasMixExs ? 'mix' : null;
   const resolvedPackageManager =
-    packageJsonManager || lockfileManager || fallbackManager;
+    packageJsonManager ||
+    (hasMultipleJsLockfiles
+      ? null
+      : lockfileManager || pythonDetection.manager || fallbackManager);
+  const unsupported = !resolvedPackageManager ? pythonDetection.unsupported : '';
   const detectionSource = packageJsonManager
     ? 'package.json#packageManager'
     : lockfileManager
       ? 'lockfile'
-      : fallbackManager
-        ? 'language_fallback'
-        : '';
+      : pythonDetection.manager
+        ? pythonDetection.source
+        : fallbackManager
+          ? 'language_fallback'
+          : unsupported
+            ? 'unsupported'
+            : '';
 
   let detectedMessage = 'We could not auto-detect a package manager, so you can choose one.';
 
@@ -258,11 +353,17 @@ export async function detectProject(cwd = process.cwd()) {
         ? 'from package.json packageManager'
         : detectionSource === 'lockfile'
           ? 'from lockfiles'
-          : 'from project files';
+          : detectionSource === 'python_lockfile'
+            ? 'from Python lockfiles'
+            : detectionSource === 'python_manifest'
+              ? 'from Python project files'
+              : 'from project files';
 
     detectedMessage = `We detected a ${PACKAGE_MANAGER_PRESETS[resolvedPackageManager].label} ${sourceDetail}.`;
-  } else if (lockfileManagers.length > 1) {
+  } else if (hasMultipleJsLockfiles) {
     detectedMessage = `We found multiple lockfiles (${lockfileManagers.join(', ')}), so choose the package manager to use.`;
+  } else if (unsupported && pythonDetection.detectedMessage) {
+    detectedMessage = pythonDetection.detectedMessage;
   }
 
   return {
@@ -271,6 +372,7 @@ export async function detectProject(cwd = process.cwd()) {
     name,
     detectedMessage,
     detectionSource,
-    detectedLockfileManagers: lockfileManagers
+    detectedLockfileManagers: lockfileManagers,
+    unsupported
   };
 }

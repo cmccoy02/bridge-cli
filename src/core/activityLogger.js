@@ -84,3 +84,33 @@ export async function logRunFailure(context, error, details = {}) {
     ...details
   });
 }
+
+function resolveRepoName(context, payloadRepo = '') {
+  if (payloadRepo && typeof payloadRepo === 'string' && payloadRepo.trim()) {
+    return payloadRepo.trim();
+  }
+
+  if (context && typeof context.repo === 'string' && context.repo.trim()) {
+    return context.repo.trim();
+  }
+
+  return path.basename(context?.cwd || process.cwd());
+}
+
+export async function logDepDelta(context, payload = {}) {
+  await logActivity('dep_delta', {
+    runId: context.runId,
+    command: context.command,
+    repo: resolveRepoName(context, payload.repo),
+    ...payload
+  });
+}
+
+export async function logDepDeltaSummary(context, payload = {}) {
+  await logActivity('dep_delta_summary', {
+    runId: context.runId,
+    command: context.command,
+    repo: resolveRepoName(context, payload.repo),
+    ...payload
+  });
+}

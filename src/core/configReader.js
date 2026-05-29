@@ -60,7 +60,7 @@ function findMissingFields(config) {
     }
 
     if (field === 'cleanCommands') {
-      if (!Array.isArray(config.cleanCommands) || config.cleanCommands.length === 0) {
+      if (!Array.isArray(config.cleanCommands)) {
         missing.push(field);
       }
 
@@ -112,8 +112,8 @@ function findShapeIssues(config) {
           issues.push(`scopes[${index}].updateCommand is required`);
         }
 
-        if (!Array.isArray(scope.cleanCommands) || scope.cleanCommands.length === 0) {
-          issues.push(`scopes[${index}].cleanCommands must be a non-empty array`);
+        if (!Array.isArray(scope.cleanCommands)) {
+          issues.push(`scopes[${index}].cleanCommands must be an array`);
         }
       });
     }

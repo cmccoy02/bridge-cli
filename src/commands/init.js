@@ -49,6 +49,14 @@ export async function initCommand({ cwd = process.cwd() } = {}) {
     info(detected.detectedMessage);
     line();
 
+    if (detected.unsupported) {
+      warn('Initialization stopped: unsupported dependency layout for safe patching.');
+      await logRunEnd(run, 'unsupported', {
+        unsupported: detected.unsupported
+      });
+      return false;
+    }
+
     const basePrompts = [
       {
         type: 'text',
