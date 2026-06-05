@@ -6,16 +6,23 @@ Bridge copies your current repository into an isolated temp environment, updates
 
 ## Quick Start
 
-1. Install:
+1. Install from the npm registry:
 
 ```bash
-npm install -g bridge-cli
+npm install -g @connormccoy/bridge
 ```
 
-If `bridge` conflicts with another local binary, use:
+Or run without installing:
 
 ```bash
-bridge-cli --help
+npx @connormccoy/bridge --help
+```
+
+For local source testing from this repository:
+
+```bash
+npm install -g .
+bridge --help
 ```
 
 2. Initialize Bridge in your project:
@@ -50,11 +57,13 @@ Auto-detection before prompts:
 
 Runs the patch engine end-to-end:
 - Copy to temp dir
-- Clean the copied repo snapshot and fast-forward from origin when available
-- Anchor patching to origin's default branch (typically `main`/`master`)
+- Fetch origin and resolve the configured default branch
+- Check out and pull the current default branch tip
+- Delete local temp branches except the default branch
+- Create and check out the Bridge patch branch before updates run
 - Clean/install/update/reinstall using config commands
 - Run optional scripts
-- Create branch, commit, push
+- Commit and push only through the protected-branch guard
 - Print compare URL and final summary
 - Always cleanup temp directory
 
@@ -89,7 +98,9 @@ File: `bridge.config.json` (or `.bridge.config.json`)
   ],
   "beforeScripts": [],
   "afterScripts": [],
-  "branchPrefix": "bridge/patch"
+  "branchPrefix": "bridge/patch",
+  "defaultBranch": "main",
+  "protectedBranches": ["main"]
 }
 ```
 
@@ -105,10 +116,13 @@ Optional fields:
 - `beforeScripts`
 - `afterScripts`
 - `branchPrefix` (defaults to `bridge/patch`)
+- `defaultBranch` (if omitted, Bridge detects `origin`'s default branch and records it in the PR branch)
+- `protectedBranches` (additional branch names Bridge must never push to)
 - `scopes` (additional nested directories to patch in the same run)
 
 Notes:
-- If `bridge.config.json` is not tracked yet, Bridge will include it in the patch commit automatically.
+- If `bridge.config.json` is not tracked yet, Bridge will include it in the patch commit automatically, then remove the trailing untracked local copy after the PR branch is pushed.
+- If `bridge.config.json` is already tracked, Bridge leaves your local copy in place.
 
 ## Config Examples
 
@@ -171,10 +185,10 @@ Bridge is intentionally simple and deterministic:
 
 1. Read `bridge.config.json`
 2. Copy repo into an isolated temp directory
-3. Clean and sync the copied snapshot from origin (when available)
-4. Run your configured clean/install/update commands
-5. Commit and push a branch only if changes exist
-6. Cleanup temp directory
+3. Fetch origin, check out/pull the default branch, and create a Bridge branch
+4. Run your configured clean/install/update commands on the Bridge branch
+5. Commit and push through the protected-branch guard only if changes exist
+6. Cleanup temp directory and any first-init local config copy
 
 No language-specific core logic. Your config defines the workflow.
 

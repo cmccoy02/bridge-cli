@@ -1,11 +1,10 @@
 {
-  "name": "bridge-cli",
+  "name": "@connormccoy/bridge",
   "version": "0.1.0",
   "description": "Automated, non-breaking dependency updates. One command. One PR.",
   "type": "module",
   "bin": {
-    "bridge": "bin/bridge.js",
-    "bridge-cli": "bin/bridge.js"
+    "bridge": "./bin/bridge.js"
   },
   "files": [
     "bin",
@@ -16,7 +15,8 @@
   ],
   "scripts": {
     "start": "node ./bin/bridge.js",
-    "smoke": "node ./bin/bridge.js --help"
+    "smoke": "node ./bin/bridge.js --help",
+    "test": "node --test"
   },
   "engines": {
     "node": ">=18"

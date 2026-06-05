@@ -4,6 +4,7 @@ import path from 'node:path';
 
 import { DEFAULT_BRANCH_PREFIX, PACKAGE_MANAGER_PRESETS } from '../constants.js';
 import { formatConfig, loadConfig } from '../core/configReader.js';
+import { cleanupLocalConfigAfterSuccessfulPush } from '../core/configLifecycle.js';
 import {
   getActivityLogPath,
   logDepDelta,
@@ -16,14 +17,14 @@ import {
 } from '../core/activityLogger.js';
 import { CommandExecutionError, runCommand } from '../core/executor.js';
 import {
+  assertSafeWorkingBranch,
   commitChanges,
-  createBranch,
   getOriginUrl,
   getCompareUrl,
   hasStagedChanges,
-  pushBranch,
-  refreshFromOrigin,
-  resolveBranchName,
+  isPathTracked,
+  prepareCleanBase,
+  pushBridgeBranch,
   stageAll
 } from '../core/git.js';
 import {
@@ -491,19 +492,30 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName }) {
   return metricsSummary;
 }
 
-async function ensureBridgeConfigTracked(tempDir, config) {
-  const tracked = await runCommand('git ls-files --error-unmatch bridge.config.json', {
-    cwd: tempDir,
-    allowFailure: true,
-    quiet: true
-  });
+async function writeConfigFile(configPath, config) {
+  await fs.writeFile(configPath, `${formatConfig(config)}\n`, 'utf8');
+}
 
-  if (tracked.success) {
+async function restoreLoadedConfig({ sourceConfigPath, tempConfigPath }) {
+  if (await fileExists(sourceConfigPath)) {
+    await fs.copyFile(sourceConfigPath, tempConfigPath);
+    return true;
+  }
+
+  return false;
+}
+
+async function ensureBridgeConfigIncluded(tempDir, configFileName, config) {
+  if (await isPathTracked(tempDir, configFileName)) {
     return false;
   }
 
-  const configPath = path.join(tempDir, 'bridge.config.json');
-  await fs.writeFile(configPath, `${formatConfig(config)}\n`, 'utf8');
+  const configPath = path.join(tempDir, configFileName);
+
+  if (!(await fileExists(configPath))) {
+    await writeConfigFile(configPath, config);
+  }
+
   return true;
 }
 
@@ -537,6 +549,7 @@ export async function patchCommand({ cwd = process.cwd() } = {}) {
   const tempDir = path.join(os.tmpdir(), `bridge-${sanitizeSegment(repoName)}-${Date.now()}`);
   const branchPrefix = config.branchPrefix || DEFAULT_BRANCH_PREFIX;
   const dateStamp = getDateStamp();
+  const configFileName = path.basename(configPath);
   let depDeltaSummary = createDepDeltaSummary();
 
   let branchName = '';
@@ -558,53 +571,70 @@ export async function patchCommand({ cwd = process.cwd() } = {}) {
     });
     info(`Isolated workspace: ${tempDir}`);
 
-    let syncResult;
-    try {
-      syncResult = await runPhase({
-        run,
-        phase: 'sync',
-        spinnerText: 'Syncing with origin...',
-        successText: 'Fetched latest remote state',
-        task: async () => {
-          const result = await refreshFromOrigin(tempDir, { cleanLocal: true });
-          baseBranch = result.branch || '';
+    const sourceConfigPath = path.join(cwd, configFileName);
+    const copiedConfigPath = path.join(tempDir, configFileName);
+    const configuredDefaultBranch = config.defaultBranch || '';
+    const protectedBranches = config.protectedBranches || [];
 
-          const configFileName = path.basename(configPath);
-          const sourceConfigPath = path.join(cwd, configFileName);
-          const copiedConfigPath = path.join(tempDir, configFileName);
+    const cleanBaseResult = await runPhase({
+      run,
+      phase: 'clean_base',
+      spinnerText: 'Preparing clean default branch base...',
+      successText: 'Clean base and Bridge branch ready',
+      task: async () => {
+        const result = await prepareCleanBase(tempDir, {
+          configuredDefaultBranch,
+          protectedBranches,
+          branchPrefix,
+          dateStamp
+        });
+        baseBranch = result.branch;
+        branchName = result.branchName;
 
-          if (await fileExists(sourceConfigPath)) {
-            await fs.copyFile(sourceConfigPath, copiedConfigPath);
-          }
+        await restoreLoadedConfig({
+          sourceConfigPath,
+          tempConfigPath: copiedConfigPath
+        });
 
-          return result;
+        if (!configuredDefaultBranch && result.branch) {
+          config = {
+            ...config,
+            defaultBranch: result.branch
+          };
+          await writeConfigFile(copiedConfigPath, config);
         }
-      });
-    } catch (syncError) {
-      warn(`Could not fast-forward to origin. Continuing with local snapshot: ${syncError.message}`);
-      await logPhase(run, 'sync', 'warning', { message: syncError.message });
-      syncResult = {
-        hasOrigin: false,
-        branch: '',
-        beforeSha: '',
-        afterSha: '',
-        advancedBy: 0
-      };
+
+        return result;
+      }
+    });
+
+    info(
+      `Base branch: ${cleanBaseResult.branch} | ${shortSha(cleanBaseResult.beforeSha)} -> ${shortSha(cleanBaseResult.afterSha)}`
+    );
+    info(`Patch branch: ${branchName}`);
+
+    if (cleanBaseResult.detectedDefaultBranch) {
+      info(`Detected and recorded default branch: ${cleanBaseResult.branch}`);
     }
 
-    if (syncResult.hasOrigin) {
-      const branchLabel = syncResult.branch || '(unknown)';
-      info(
-        `Base branch: ${branchLabel} | ${shortSha(syncResult.beforeSha)} -> ${shortSha(syncResult.afterSha)}`
-      );
-      if (syncResult.advancedBy > 0) {
-        info(`Remote sync advanced ${syncResult.advancedBy} commit(s).`);
-      } else if (syncResult.beforeSha === syncResult.afterSha) {
-        info('Remote sync did not advance commits.');
-      }
-    } else {
-      warn('No origin remote found; running against local snapshot.');
+    if (cleanBaseResult.deletedBranches.length > 0) {
+      info(`Deleted local temp branches: ${cleanBaseResult.deletedBranches.join(', ')}`);
     }
+
+    if (cleanBaseResult.advancedBy > 0) {
+      info(`Remote sync advanced ${cleanBaseResult.advancedBy} commit(s).`);
+    } else if (cleanBaseResult.beforeSha === cleanBaseResult.afterSha) {
+      info('Remote sync did not advance commits.');
+    } else {
+      info('Remote sync reset the temp workspace to the default branch tip.');
+    }
+
+    await logPhase(run, 'clean_base_details', 'success', {
+      baseBranch,
+      branchName,
+      detectedDefaultBranch: cleanBaseResult.detectedDefaultBranch,
+      deletedBranches: cleanBaseResult.deletedBranches
+    });
 
     const scopes = buildPatchScopes(config);
     info(`Update scopes: ${scopes.length}`);
@@ -635,16 +665,13 @@ export async function patchCommand({ cwd = process.cwd() } = {}) {
       spinnerText: 'Preparing git changes...',
       successText: 'Git changes prepared',
       task: async () => {
-        branchName = await resolveBranchName(tempDir, branchPrefix, dateStamp);
-        await createBranch(tempDir, branchName);
-        const addedConfig = await ensureBridgeConfigTracked(tempDir, config);
+        const addedConfig = await ensureBridgeConfigIncluded(tempDir, configFileName, config);
         await stageAll(tempDir);
         return { addedConfig };
       }
     });
-    info(`Patch branch: ${branchName}`);
     if (gitPrepResult?.addedConfig) {
-      info('Added bridge.config.json to patch branch because it was not tracked.');
+      info(`Added ${configFileName} to patch branch because it was not tracked.`);
     }
 
     if (!(await hasStagedChanges(tempDir))) {
@@ -675,10 +702,19 @@ export async function patchCommand({ cwd = process.cwd() } = {}) {
       spinnerText: 'Committing and pushing branch...',
       successText: 'PR branch pushed. Open your repo to create the pull request.',
       task: async () => {
+        await assertSafeWorkingBranch(tempDir, {
+          branchName,
+          defaultBranch: baseBranch,
+          protectedBranches: config.protectedBranches
+        });
         await commitChanges(tempDir, 'bridge: update dependencies (non-breaking)');
-        await pushBranch(tempDir, branchName);
+        await pushBridgeBranch(tempDir, {
+          branchName,
+          defaultBranch: baseBranch,
+          protectedBranches: config.protectedBranches
+        });
       },
-      meta: { branchName }
+      meta: { branchName, baseBranch }
     });
 
     const originUrl = await getOriginUrl(tempDir);
@@ -717,6 +753,18 @@ export async function patchCommand({ cwd = process.cwd() } = {}) {
       info(`Cleaned isolated workspace: ${tempDir}`);
     } catch (cleanupError) {
       warn(`Failed to delete temp directory: ${cleanupError.message}`);
+    }
+
+    if (status === 'pushed') {
+      const configCleanup = await cleanupLocalConfigAfterSuccessfulPush(cwd, configFileName, {
+        onWarning: (cleanupError) => {
+          warn(`Could not clean up ${configFileName}: ${cleanupError.message}`);
+        }
+      });
+
+      if (configCleanup.removed) {
+        info(`Removed local untracked ${configFileName} after successful push.`);
+      }
     }
 
     if (status === 'pushed') {

@@ -90,6 +90,14 @@ function findShapeIssues(config) {
     issues.push('afterScripts must be an array of shell commands');
   }
 
+  if ('protectedBranches' in config && !Array.isArray(config.protectedBranches)) {
+    issues.push('protectedBranches must be an array of branch names');
+  }
+
+  if ('defaultBranch' in config && typeof config.defaultBranch !== 'string') {
+    issues.push('defaultBranch must be a branch name string');
+  }
+
   if ('scopes' in config) {
     if (!Array.isArray(config.scopes)) {
       issues.push('scopes must be an array');
@@ -144,7 +152,10 @@ export function normalizeConfig(config) {
     branchPrefix:
       typeof config.branchPrefix === 'string' && config.branchPrefix.trim()
         ? config.branchPrefix.trim()
-        : DEFAULT_BRANCH_PREFIX
+        : DEFAULT_BRANCH_PREFIX,
+    defaultBranch:
+      typeof config.defaultBranch === 'string' ? config.defaultBranch.trim() : '',
+    protectedBranches: normalizeArray(config.protectedBranches)
   };
 }
 

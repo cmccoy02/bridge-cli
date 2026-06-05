@@ -4,6 +4,27 @@ function getGit(cwd) {
   return simpleGit({ baseDir: cwd });
 }
 
+function normalizeBranchName(branchName) {
+  return typeof branchName === 'string' ? branchName.trim() : '';
+}
+
+function normalizeBranchList(branches = []) {
+  if (!Array.isArray(branches)) {
+    return [];
+  }
+
+  return branches
+    .map((branch) => normalizeBranchName(branch))
+    .filter((branch) => branch.length > 0);
+}
+
+function protectedBranchSet(defaultBranch, protectedBranches = []) {
+  return new Set([
+    normalizeBranchName(defaultBranch),
+    ...normalizeBranchList(protectedBranches)
+  ].filter(Boolean));
+}
+
 async function getHeadSha(git) {
   try {
     return (await git.revparse(['--short', 'HEAD'])).trim();
@@ -34,6 +55,10 @@ export async function createBranch(cwd, branchName) {
   await getGit(cwd).checkoutLocalBranch(branchName);
 }
 
+export async function getCurrentBranch(cwd) {
+  return (await getGit(cwd).revparse(['--abbrev-ref', 'HEAD'])).trim();
+}
+
 export async function stageAll(cwd) {
   await getGit(cwd).add(['-A']);
 }
@@ -47,7 +72,41 @@ export async function commitChanges(cwd, message) {
   await getGit(cwd).commit(message);
 }
 
-export async function pushBranch(cwd, branchName) {
+export async function assertSafeWorkingBranch(
+  cwd,
+  { branchName, defaultBranch, protectedBranches = [] }
+) {
+  const expectedBranch = normalizeBranchName(branchName);
+  const currentBranch = await getCurrentBranch(cwd);
+  const neverPush = protectedBranchSet(defaultBranch, protectedBranches);
+
+  if (!expectedBranch) {
+    throw new Error('Safety check failed: Bridge working branch is empty. Aborting without pushing.');
+  }
+
+  if (currentBranch !== expectedBranch) {
+    throw new Error(
+      `Safety check failed: expected Bridge branch "${expectedBranch}" before commit/push, but current branch is "${currentBranch}". Aborting without pushing.`
+    );
+  }
+
+  if (neverPush.has(currentBranch) || neverPush.has(expectedBranch)) {
+    throw new Error(
+      `Safety check failed: "${expectedBranch}" is protected and cannot be pushed by Bridge. Aborting without pushing.`
+    );
+  }
+
+  return {
+    currentBranch,
+    protectedBranches: [...neverPush]
+  };
+}
+
+export async function pushBridgeBranch(
+  cwd,
+  { branchName, defaultBranch, protectedBranches = [] }
+) {
+  await assertSafeWorkingBranch(cwd, { branchName, defaultBranch, protectedBranches });
   await getGit(cwd).push('origin', branchName);
 }
 
@@ -77,7 +136,7 @@ async function remoteBranchRefExists(git, remoteBranchRef) {
   }
 }
 
-async function detectDefaultBaseBranch(git) {
+async function detectRemoteDefaultBranch(git) {
   try {
     const remoteHead = (
       await git.raw(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'])
@@ -87,87 +146,126 @@ async function detectDefaultBaseBranch(git) {
       return remoteHead.replace(/^origin\//, '');
     }
   } catch {
-    // Fall through to additional heuristics.
+    // Fall through to asking the remote directly.
   }
 
-  const candidates = ['main', 'master'];
+  try {
+    const remoteShow = await git.raw(['remote', 'show', 'origin']);
+    const headBranchLine = remoteShow
+      .split('\n')
+      .map((line) => line.trim())
+      .find((line) => line.startsWith('HEAD branch:'));
 
-  for (const candidate of candidates) {
-    if (await remoteBranchRefExists(git, `refs/remotes/origin/${candidate}`)) {
-      return candidate;
+    if (headBranchLine) {
+      const branch = headBranchLine.replace(/^HEAD branch:\s*/, '').trim();
+
+      if (branch && branch !== '(unknown)') {
+        return branch;
+      }
     }
-  }
-
-  const currentBranch = (await git.revparse(['--abbrev-ref', 'HEAD'])).trim();
-
-  if (
-    currentBranch &&
-    currentBranch !== 'HEAD' &&
-    (await remoteBranchRefExists(git, `refs/remotes/origin/${currentBranch}`))
-  ) {
-    return currentBranch;
-  }
-
-  const remoteBranches = (await git.raw(['branch', '-r']))
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line.startsWith('origin/') && !line.includes(' -> '));
-
-  if (remoteBranches.length > 0) {
-    return remoteBranches[0].replace(/^origin\//, '');
+  } catch {
+    // The caller turns an empty result into an actionable error.
   }
 
   return '';
 }
 
-export async function refreshFromOrigin(cwd, { cleanLocal = false } = {}) {
+async function resolveDefaultBaseBranch(git, configuredDefaultBranch) {
+  const configured = normalizeBranchName(configuredDefaultBranch);
+
+  if (configured) {
+    return {
+      branch: configured,
+      detected: false
+    };
+  }
+
+  const detected = await detectRemoteDefaultBranch(git);
+
+  if (detected) {
+    return {
+      branch: detected,
+      detected: true
+    };
+  }
+
+  throw new Error(
+    'Could not determine origin default branch. Add "defaultBranch": "main" (or "master") to bridge.config.json, or run `git remote set-head origin -a` in the repository and try again.'
+  );
+}
+
+async function deleteLocalBranchesExcept(git, keepBranch) {
+  const branches = (await git.raw(['branch', '--format=%(refname:short)']))
+    .split('\n')
+    .map((branch) => branch.trim())
+    .filter(Boolean);
+  const deletedBranches = [];
+
+  for (const branch of branches) {
+    if (branch === keepBranch) {
+      continue;
+    }
+
+    await git.raw(['branch', '-D', branch]);
+    deletedBranches.push(branch);
+  }
+
+  return deletedBranches;
+}
+
+export async function prepareCleanBase(
+  cwd,
+  { configuredDefaultBranch = '', protectedBranches = [], branchPrefix, dateStamp }
+) {
   const git = getGit(cwd);
   const remotes = await git.getRemotes();
   const hasOrigin = remotes.some((remote) => remote.name === 'origin');
 
   if (!hasOrigin) {
-    return {
-      hasOrigin: false,
-      updated: false,
-      branch: '',
-      beforeSha: await getHeadSha(git),
-      afterSha: await getHeadSha(git),
-      advancedBy: 0
-    };
+    throw new Error('No origin remote found. Add an origin remote before running `bridge patch`.');
   }
 
   const beforeSha = await getHeadSha(git);
-
-  if (cleanLocal) {
-    await cleanWorkingTree(cwd);
-  }
-
   await git.fetch('origin');
-  const branch = await detectDefaultBaseBranch(git);
+  const { branch: defaultBranch, detected } = await resolveDefaultBaseBranch(
+    git,
+    configuredDefaultBranch
+  );
 
-  if (!branch) {
-    const afterShaWithoutBranch = await getHeadSha(git);
-
-    return {
-      hasOrigin: true,
-      updated: true,
-      branch: '',
-      beforeSha,
-      afterSha: afterShaWithoutBranch,
-      advancedBy: await getCommitDistance(git, beforeSha, afterShaWithoutBranch)
-    };
+  if (!(await remoteBranchRefExists(git, `refs/remotes/origin/${defaultBranch}`))) {
+    throw new Error(
+      `Default branch "${defaultBranch}" was not found on origin. Update bridge.config.json or check the remote.`
+    );
   }
 
-  await git.checkout(['-B', branch, `origin/${branch}`]);
+  const branchName = await resolveBranchName(cwd, branchPrefix, dateStamp);
+  const neverPush = protectedBranchSet(defaultBranch, protectedBranches);
+
+  if (neverPush.has(branchName)) {
+    throw new Error(
+      `Refusing to create Bridge branch "${branchName}" because it is protected. Change branchPrefix in bridge.config.json.`
+    );
+  }
+
+  await git.raw(['checkout', '--force', defaultBranch]);
+  await git.raw(['reset', '--hard', `origin/${defaultBranch}`]);
+  await git.pull('origin', defaultBranch);
+  await git.raw(['reset', '--hard', `origin/${defaultBranch}`]);
+  await git.raw(['clean', '-fd']);
+  const deletedBranches = await deleteLocalBranchesExcept(git, defaultBranch);
+  await git.checkoutLocalBranch(branchName);
   const afterSha = await getHeadSha(git);
 
   return {
     hasOrigin: true,
     updated: true,
-    branch,
+    branch: defaultBranch,
+    branchName,
     beforeSha,
     afterSha,
-    advancedBy: await getCommitDistance(git, beforeSha, afterSha)
+    advancedBy: await getCommitDistance(git, beforeSha, afterSha),
+    deletedBranches,
+    detectedDefaultBranch: detected
   };
 }
 
@@ -190,6 +288,28 @@ export async function resolveBranchName(cwd, branchPrefix, dateStamp) {
   }
 
   return `${base}-${counter}`;
+}
+
+export async function isPathTracked(cwd, filePath) {
+  try {
+    await getGit(cwd).raw(['ls-files', '--error-unmatch', filePath]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function isPathInHistory(cwd, filePath) {
+  try {
+    const output = await getGit(cwd).raw(['log', '--format=%H', '--', filePath]);
+    return output.trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
+export async function isPathTrackedOrInHistory(cwd, filePath) {
+  return (await isPathTracked(cwd, filePath)) || (await isPathInHistory(cwd, filePath));
 }
 
 export function normalizeRepoWebUrl(repoUrl) {
