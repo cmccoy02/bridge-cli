@@ -74,15 +74,15 @@ export const PACKAGE_MANAGER_PRESETS = {
     manifest: 'pyproject.toml'
   },
   pip: {
-    label: 'Python project using pip',
-    installCommand:
-      '.bridge-venv/bin/python -m pip install --upgrade pip && .bridge-venv/bin/python -m pip install -r requirements.txt',
-    updateCommand:
-      '.bridge-venv/bin/python -m pip install --upgrade -r requirements.txt && .bridge-venv/bin/python -m pip freeze --exclude-editable | grep -Ev "^(pip|setuptools|wheel)==" > requirements.txt',
-    cleanCommands: ['rm -rf .bridge-venv', 'python3 -m venv .bridge-venv'],
+    label: 'Python project using requirements.txt',
+    binary: 'uv',
+    installCommand: 'uv pip install --python .bridge-venv/bin/python -r requirements.txt',
+    updateCommand: 'uv pip compile bridge-generated-requirements.in -o bridge-verified-requirements.txt',
+    cleanCommands: ['rm -rf .bridge-venv', 'uv venv .bridge-venv'],
+    updateStrategy: 'python-requirements-wildcard',
     lockfile: null,
     lockfileFormat: null,
-    manifest: null
+    manifest: 'requirements.txt'
   },
   mix: {
     label: 'Elixir project using mix',

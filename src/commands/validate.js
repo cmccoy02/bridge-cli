@@ -1,3 +1,4 @@
+import { PACKAGE_MANAGER_PRESETS } from '../constants.js';
 import { loadConfig } from '../core/configReader.js';
 import {
   logRunEnd,
@@ -55,7 +56,8 @@ export async function validateCommand({ cwd = process.cwd(), offline = false } =
   }
 
   if (config) {
-    const managerBinary = firstToken(config.packageManager);
+    const managerPreset = PACKAGE_MANAGER_PRESETS[config.packageManager] || null;
+    const managerBinary = firstToken(managerPreset?.binary || config.packageManager);
 
     if (!(await commandExists('git'))) {
       issues.push('git is not available in PATH');

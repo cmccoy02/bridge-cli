@@ -154,11 +154,10 @@ async function detectPythonManager(cwd) {
 
   if (await fileExists(path.join(cwd, 'requirements.txt'))) {
     return {
-      manager: null,
-      source: 'unsupported',
-      unsupported: 'bare-requirements',
-      detectedMessage:
-        "Bridge detected a bare requirements.txt project. Bridge can't safely patch bare requirements.txt yet. Add requirements.in + pip-compile (or use poetry/pipenv/uv) and run bridge init again."
+      manager: 'pip',
+      source: 'python_manifest',
+      unsupported: '',
+      detectedMessage: `We detected a ${PACKAGE_MANAGER_PRESETS.pip.label} from project files.`
     };
   }
 

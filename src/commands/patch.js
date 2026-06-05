@@ -33,6 +33,10 @@ import {
   mergeDepDeltaSummaries,
   parseDirectDeps
 } from '../core/lockfileDiff.js';
+import {
+  formatPythonRequirementsSummary,
+  runPythonRequirementsWildcardUpdate
+} from '../core/pythonRequirementsUpdater.js';
 import { printBanner } from '../ui/banner.js';
 import { command, error, info, line, success, warn } from '../ui/logger.js';
 import { createSpinner } from '../ui/spinner.js';
@@ -182,6 +186,10 @@ function formatDeltaSummaryLine(summary) {
   return `Deltas: ${summary.directChanged} direct, ${summary.transitiveChanged} transitive (${summary.byBump.patch} patch / ${summary.byBump.minor} minor / ${summary.byBump.major} major / ${summary.byBump.other} other)`;
 }
 
+function scopeUpdateStrategy(scope, preset) {
+  return scope.updateStrategy || preset?.updateStrategy || '';
+}
+
 async function copyToIsolatedWorkspace(sourceDir, destinationDir) {
   await fs.cp(sourceDir, destinationDir, {
     recursive: true,
@@ -298,6 +306,7 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName }) {
   const label = scopeLabel(relativePath);
   const scopeDir = relativePath === '.' ? tempDir : path.join(tempDir, relativePath);
   const scopePreset = resolveScopePreset(scope);
+  const updateStrategy = scopeUpdateStrategy(scope, scopePreset);
   const lockfile = scope.lockfile || scopePreset?.lockfile || null;
   const lockfileFormat = scope.lockfileFormat || scopePreset?.lockfileFormat || null;
   const manifest = scope.manifest || scopePreset?.manifest || null;
@@ -365,14 +374,29 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName }) {
     phase: `update:${label}`,
     spinnerText: `Running update command (${label})...`,
     successText: 'Dependencies updated to latest non-breaking versions',
-    task: async () =>
-      runCommand(scope.updateCommand, {
+    task: async () => {
+      if (updateStrategy === 'python-requirements-wildcard') {
+        return runPythonRequirementsWildcardUpdate({
+          cwd: scopeDir,
+          runId: `${run.runId}-${label}`
+        });
+      }
+
+      return runCommand(scope.updateCommand, {
         cwd: scopeDir,
         quiet: true
-      }),
+      });
+    },
     meta: { command: scope.updateCommand, scope: label }
   });
-  line(normalizeCommandOutput(updateResult.stdout, 220) || 'Update output: (no stdout)');
+  if (updateResult.pythonRequirementsSummary) {
+    printSummary(
+      formatPythonRequirementsSummary(updateResult.pythonRequirementsSummary),
+      'Python requirements'
+    );
+  } else {
+    line(normalizeCommandOutput(updateResult.stdout, 220) || 'Update output: (no stdout)');
+  }
 
   await runPhase({
     run,
