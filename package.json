@@ -1,10 +1,11 @@
 {
-  "name": "@connormccoy/bridge",
+  "name": "bridge-cli",
   "version": "0.1.0",
   "description": "Automated, non-breaking dependency updates. One command. One PR.",
   "type": "module",
   "bin": {
-    "bridge": "./bin/bridge.js"
+    "bridge": "./bin/bridge.js",
+    "bridge-cli": "./bin/bridge.js"
   },
   "files": [
     "bin",
