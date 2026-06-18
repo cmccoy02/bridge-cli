@@ -119,6 +119,7 @@ Optional fields:
 - `defaultBranch` (if omitted, Bridge detects `origin`'s default branch and records it in the PR branch)
 - `protectedBranches` (additional branch names Bridge must never push to)
 - `scopes` (additional nested directories to patch in the same run)
+- `pythonZeroMajor` (how the Python requirements wildcard updater treats `0.x` pins): `"minor"` (default) wildcards at the major position (`0.3.0 -> 0.*`); `"patch"` keeps major+minor and wildcards the patch (`0.23.0 -> 0.23.*`); `"skip"` leaves `0.x` pins byte-identical.
 
 Notes:
 - If `bridge.config.json` is not tracked yet, Bridge will include it in the patch commit automatically, then remove the trailing untracked local copy after the PR branch is pushed.

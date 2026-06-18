@@ -2,11 +2,22 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { runCommand } from './executor.js';
+import { CommandExecutionError, runCommand } from './executor.js';
 import { normalizePythonName } from './nameNormalizer.js';
 
+// A "clean" exact pin: name[extras]==<pure numeric, dotted version> followed by at
+// most an inline `# comment` / trailing whitespace. The version is one or more
+// numeric components (==X, ==X.Y, ==X.Y.Z, ==X.Y.Z.W). Anything carrying a
+// pre/post/dev/epoch/local segment, an environment marker, or a non-`==` operator
+// fails this match and is passed through untouched.
 const CLEAN_EXACT_PIN =
-  /^(\s*)([A-Za-z0-9][A-Za-z0-9._-]*(?:\[[A-Za-z0-9][A-Za-z0-9._,-]*\])?)(\s*==\s*)(\d+)\.(\d+)\.(\d+)((?:\s+#.*)?\s*)$/;
+  /^(\s*)([A-Za-z0-9][A-Za-z0-9._-]*(?:\[[A-Za-z0-9][A-Za-z0-9._,-]*\])?)(\s*==\s*)(\d+(?:\.\d+)*)((?:\s+#.*)?\s*)$/;
+
+const ZERO_MAJOR_POLICIES = ['minor', 'patch', 'skip'];
+
+export function normalizeZeroMajorPolicy(policy) {
+  return ZERO_MAJOR_POLICIES.includes(policy) ? policy : 'minor';
+}
 
 function quote(value) {
   return `'${String(value).replace(/'/g, `'"'"'`)}'`;
@@ -44,8 +55,9 @@ function parseCleanExactPin(lineBody) {
   }
 
   const requirement = match[2];
-  const version = `${match[4]}.${match[5]}.${match[6]}`;
-  const major = Number.parseInt(match[4], 10);
+  const version = match[4];
+  const components = version.split('.');
+  const major = Number.parseInt(components[0], 10);
 
   if (!Number.isFinite(major)) {
     return null;
@@ -56,24 +68,101 @@ function parseCleanExactPin(lineBody) {
     requirement,
     operator: match[3],
     version,
+    components,
     major,
-    suffix: match[7],
+    suffix: match[5],
     normalizedName: normalizePythonName(requirement),
     replaceVersion(nextVersion) {
-      return `${match[1]}${requirement}${match[3]}${nextVersion}${match[7]}`;
+      return `${match[1]}${requirement}${match[3]}${nextVersion}${match[5]}`;
     }
   };
 }
 
-function parseMajor(version) {
-  const match = String(version || '').match(/^(\d+)\./);
+// Classify a passed-through line so the summary can itemize *why* it was left
+// untouched. Order matters: more specific reasons win.
+function classifyPassthrough(body) {
+  const trimmed = body.trim();
 
-  if (!match) {
-    return null;
+  if (trimmed === '') {
+    return 'blank';
   }
 
-  const major = Number.parseInt(match[1], 10);
-  return Number.isFinite(major) ? major : null;
+  if (trimmed.startsWith('#')) {
+    return 'comment';
+  }
+
+  if (/^--hash\b/.test(trimmed) || trimmed.includes('--hash')) {
+    return 'hash';
+  }
+
+  if (/^-(r|e|c)\b/.test(trimmed) || /^--(requirement|editable|constraint)\b/.test(trimmed)) {
+    return 'include';
+  }
+
+  if (trimmed.startsWith('-')) {
+    return 'option';
+  }
+
+  if (trimmed.includes(';')) {
+    return 'environment-marker';
+  }
+
+  const operatorMatch = trimmed.match(/(===|==|~=|!=|>=|<=|>|<)/);
+
+  if (!operatorMatch) {
+    return 'other';
+  }
+
+  if (operatorMatch[1] === '===') {
+    return 'arbitrary-equality';
+  }
+
+  if (operatorMatch[1] !== '==') {
+    return 'non-pin-operator';
+  }
+
+  const versionMatch = trimmed.match(/==\s*([^\s#;]+)/);
+  const version = versionMatch ? versionMatch[1] : '';
+
+  if (version.includes('!')) {
+    return 'epoch';
+  }
+
+  if (version.includes('+')) {
+    return 'local-version';
+  }
+
+  if (/dev\d*/i.test(version)) {
+    return 'dev-release';
+  }
+
+  if (/post\d*/i.test(version)) {
+    return 'post-release';
+  }
+
+  if (/(a|b|c|rc|alpha|beta|pre|preview)\d*/i.test(version)) {
+    return 'pre-release';
+  }
+
+  return 'other';
+}
+
+// Decide the wildcard to emit for a clean pin under the given 0.x policy.
+// Non-zero majors always wildcard at the major position (`2.3.0 -> 2.*`).
+// Returns `null` when the pin should be skipped (0.x with policy "skip").
+function computeWildcard(pin, policy) {
+  if (pin.major === 0) {
+    if (policy === 'skip') {
+      return null;
+    }
+
+    if (policy === 'patch' && pin.components[1] !== undefined) {
+      const minor = pin.components[1];
+      return { prefix: `0.${minor}.`, wildcard: `0.${minor}.*` };
+    }
+  }
+
+  return { prefix: `${pin.major}.`, wildcard: `${pin.major}.*` };
 }
 
 function parsePinnedVersions(content) {
@@ -96,12 +185,14 @@ function parsePinnedVersions(content) {
   return versions;
 }
 
-export function prepareWildcardRequirements(content) {
+export function prepareWildcardRequirements(content, options = {}) {
+  const policy = normalizeZeroMajorPolicy(options.zeroMajorPolicy);
   const lines = splitRequirementLines(content);
   const updatablePins = [];
   const outputLines = [];
   let skippedZeroMajor = 0;
   let passedThrough = 0;
+  const passedThroughByReason = {};
 
   for (const rawLine of lines) {
     const { body, newline } = splitLine(rawLine);
@@ -110,17 +201,22 @@ export function prepareWildcardRequirements(content) {
     if (!pin) {
       outputLines.push(rawLine);
       passedThrough += 1;
+      const reason = classifyPassthrough(body);
+      passedThroughByReason[reason] = (passedThroughByReason[reason] || 0) + 1;
       continue;
     }
 
-    if (pin.major === 0) {
-      // TODO(0.x): add a 0.x-aware upper bound strategy later; leave 0.x pins byte-identical for now.
+    const wildcard = computeWildcard(pin, policy);
+
+    if (!wildcard) {
+      // 0.x pin with policy "skip": leave byte-identical.
       outputLines.push(rawLine);
       skippedZeroMajor += 1;
       continue;
     }
 
-    const wildcardLine = `${pin.leading}${pin.requirement}${pin.operator}${pin.major}.*${pin.suffix}${newline}`;
+    pin.wildcardPrefix = wildcard.prefix;
+    const wildcardLine = `${pin.leading}${pin.requirement}${pin.operator}${wildcard.wildcard}${pin.suffix}${newline}`;
     outputLines.push(wildcardLine);
     updatablePins.push(pin);
   }
@@ -129,13 +225,15 @@ export function prepareWildcardRequirements(content) {
     content: outputLines.join(''),
     updatablePins,
     skippedZeroMajor,
-    passedThrough
+    passedThrough,
+    passedThroughByReason,
+    zeroMajorPolicy: policy
   };
 }
 
 export function buildResolvedRequirementsContent(originalContent, resolvedContent, updatablePins) {
   const resolvedVersions = parsePinnedVersions(resolvedContent);
-  const updatableNames = new Set(updatablePins.map((pin) => pin.normalizedName));
+  const updatableByName = new Map(updatablePins.map((pin) => [pin.normalizedName, pin]));
   const changes = [];
   const outputLines = [];
 
@@ -143,22 +241,26 @@ export function buildResolvedRequirementsContent(originalContent, resolvedConten
     const { body, newline } = splitLine(rawLine);
     const pin = parseCleanExactPin(body);
 
-    if (!pin || !updatableNames.has(pin.normalizedName)) {
+    if (!pin || !updatableByName.has(pin.normalizedName)) {
       outputLines.push(rawLine);
       continue;
     }
 
+    const updatable = updatableByName.get(pin.normalizedName);
     const resolved = resolvedVersions.get(pin.normalizedName);
 
     if (!resolved) {
       throw new Error(`Resolved output did not include ${pin.requirement}.`);
     }
 
-    const resolvedMajor = parseMajor(resolved.version);
+    // Prefix guard: the resolved version must stay inside the wildcard lane we
+    // opened (`2.`, `0.`, or `0.3.`). This uniformly covers the minor lane, 0.x,
+    // and the patch policy, and prevents e.g. `0.* -> 1.0`.
+    const prefix = updatable.wildcardPrefix;
 
-    if (resolvedMajor !== pin.major) {
+    if (!resolved.version.startsWith(prefix)) {
       throw new Error(
-        `Resolved ${pin.requirement} to ${resolved.version}, which crosses major ${pin.major}.`
+        `Resolved ${pin.requirement} to ${resolved.version}, which falls outside its wildcard range ${prefix}* (line left unchanged).`
       );
     }
 
@@ -180,15 +282,82 @@ export function buildResolvedRequirementsContent(originalContent, resolvedConten
   };
 }
 
-export function formatPythonRequirementsSummary(summary) {
-  const lines = [
-    `Moved packages: ${summary.changes.length}`,
-    `Skipped 0.x pins: ${summary.skippedZeroMajor}`
+// uv (through its pip interface) phrases an unsatisfiable resolve a few ways,
+// e.g. "there is no version of <name>==<ver>", "<name> was not found in the
+// package registry", "only <name><=X is available", and "you require
+// <name>==...". Extract the offending package names from whichever wording uv
+// used so we can name the original pin the user wrote.
+function extractUnsatisfiableNames(stderr) {
+  const text = String(stderr || '');
+  const names = new Set();
+  const patterns = [
+    /there is no version of\s+([A-Za-z0-9][A-Za-z0-9._-]*)/gi,
+    /\bBecause\s+([A-Za-z0-9][A-Za-z0-9._-]*)\s+was not found in the package registry/gi,
+    /\bonly\s+([A-Za-z0-9][A-Za-z0-9._-]*)\s*[<>=!~]/gi,
+    /\byou require\s+([A-Za-z0-9][A-Za-z0-9._-]*)\s*[<>=!~]/gi
   ];
 
-  for (const change of summary.changes) {
-    lines.push(`${change.name}: ${change.from} -> ${change.to}`);
+  for (const pattern of patterns) {
+    let match;
+
+    while ((match = pattern.exec(text)) !== null) {
+      names.add(match[1]);
+    }
   }
+
+  return [...names];
+}
+
+function firstStderrLine(stderr) {
+  return String(stderr || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.length > 0) || 'unknown resolver error';
+}
+
+function buildResolveError(stderr, requirementsFile, updatablePins) {
+  const names = extractUnsatisfiableNames(stderr);
+  const normalizedNames = new Set(names.map((name) => normalizePythonName(name)));
+
+  // Prefer naming the original pins we actually transformed; this filters out
+  // any transitive packages uv may mention in a long error trace.
+  const offending = updatablePins
+    .filter((pin) => normalizedNames.has(pin.normalizedName))
+    .map((pin) => `${pin.requirement}==${pin.version}`);
+
+  if (offending.length === 0) {
+    return new Error(
+      `Cannot resolve dependencies in ${requirementsFile}: ${firstStderrLine(stderr)} (file left unchanged).`
+    );
+  }
+
+  const verb = offending.length === 1 ? 'is' : 'are';
+  return new Error(
+    `Cannot resolve: ${offending.join(', ')} ${verb} not available on the index for ${requirementsFile} (line left unchanged).`
+  );
+}
+
+export function formatPythonRequirementsSummary(summary) {
+  const lines = [`Moved packages: ${summary.changes.length}`];
+
+  for (const change of summary.changes) {
+    lines.push(`  ${change.name}: ${change.from} -> ${change.to}`);
+  }
+
+  lines.push(`Transformed pins: ${summary.transformed}`);
+
+  if (summary.zeroMajorPolicy === 'skip') {
+    lines.push(`Skipped 0.x pins: ${summary.skippedZeroMajor}`);
+  }
+
+  const reasons = summary.passedThroughByReason || {};
+  const itemized = Object.keys(reasons)
+    .sort()
+    .map((reason) => `${reasons[reason]} ${reason}`);
+
+  lines.push(
+    `Passed through: ${summary.passedThrough}${itemized.length ? ` (${itemized.join(', ')})` : ''}`
+  );
 
   return lines;
 }
@@ -196,11 +365,12 @@ export function formatPythonRequirementsSummary(summary) {
 export async function runPythonRequirementsWildcardUpdate({
   cwd,
   runId,
-  requirementsFile = 'requirements.txt'
+  requirementsFile = 'requirements.txt',
+  zeroMajorPolicy = 'minor'
 }) {
   const requirementsPath = path.join(cwd, requirementsFile);
   const originalContent = await fs.readFile(requirementsPath, 'utf8');
-  const prepared = prepareWildcardRequirements(originalContent);
+  const prepared = prepareWildcardRequirements(originalContent, { zeroMajorPolicy });
   const tempBase = path.join(
     os.tmpdir(),
     `bridge.${String(runId || Date.now()).replace(/[^A-Za-z0-9._-]+/g, '-')}`
@@ -215,10 +385,19 @@ export async function runPythonRequirementsWildcardUpdate({
     await fs.writeFile(tempInputPath, prepared.content, 'utf8');
     await fs.rm(venvPath, { recursive: true, force: true });
     await runCommand(`uv venv ${quote(venvPath)}`, { cwd, quiet: true });
-    await runCommand(`uv pip compile ${quote(tempInputPath)} -o ${quote(resolvedOutputPath)}`, {
-      cwd,
-      quiet: true
-    });
+
+    try {
+      await runCommand(`uv pip compile ${quote(tempInputPath)} -o ${quote(resolvedOutputPath)}`, {
+        cwd,
+        quiet: true
+      });
+    } catch (compileError) {
+      if (compileError instanceof CommandExecutionError) {
+        throw buildResolveError(compileError.stderr, requirementsFile, prepared.updatablePins);
+      }
+
+      throw compileError;
+    }
 
     const resolvedContent = await fs.readFile(resolvedOutputPath, 'utf8');
     const resolved = buildResolvedRequirementsContent(
@@ -228,29 +407,46 @@ export async function runPythonRequirementsWildcardUpdate({
     );
 
     await fs.writeFile(verifyOutputPath, resolved.content, 'utf8');
-    await runCommand(`uv pip install --python ${quote(venvPython)} -r ${quote(verifyOutputPath)}`, {
-      cwd,
-      quiet: true
-    });
-    await runCommand(`uv pip check --python ${quote(venvPython)}`, {
-      cwd,
-      quiet: true
-    });
+
+    try {
+      await runCommand(`uv pip install --python ${quote(venvPython)} -r ${quote(verifyOutputPath)}`, {
+        cwd,
+        quiet: true
+      });
+      await runCommand(`uv pip check --python ${quote(venvPython)}`, {
+        cwd,
+        quiet: true
+      });
+    } catch (verifyError) {
+      if (verifyError instanceof CommandExecutionError) {
+        throw buildResolveError(verifyError.stderr, requirementsFile, prepared.updatablePins);
+      }
+
+      throw verifyError;
+    }
+
     // TODO(verify): run project tests inside the venv once Bridge has a configured test hook.
+    // Only written once compile + verify both pass.
     await fs.writeFile(requirementsPath, resolved.content, 'utf8');
 
     return {
       success: true,
       stdout: formatPythonRequirementsSummary({
         changes: resolved.changes,
-        skippedZeroMajor: prepared.skippedZeroMajor
+        transformed: prepared.updatablePins.length,
+        skippedZeroMajor: prepared.skippedZeroMajor,
+        passedThrough: prepared.passedThrough,
+        passedThroughByReason: prepared.passedThroughByReason,
+        zeroMajorPolicy: prepared.zeroMajorPolicy
       }).join('\n'),
       stderr: '',
       pythonRequirementsSummary: {
         changes: resolved.changes,
-        skippedZeroMajor: prepared.skippedZeroMajor,
         transformed: prepared.updatablePins.length,
-        passedThrough: prepared.passedThrough
+        skippedZeroMajor: prepared.skippedZeroMajor,
+        passedThrough: prepared.passedThrough,
+        passedThroughByReason: prepared.passedThroughByReason,
+        zeroMajorPolicy: prepared.zeroMajorPolicy
       }
     };
   } finally {

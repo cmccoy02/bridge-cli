@@ -98,6 +98,13 @@ function findShapeIssues(config) {
     issues.push('defaultBranch must be a branch name string');
   }
 
+  if (
+    'pythonZeroMajor' in config &&
+    !['minor', 'patch', 'skip'].includes(config.pythonZeroMajor)
+  ) {
+    issues.push('pythonZeroMajor must be one of "minor", "patch", or "skip"');
+  }
+
   if ('scopes' in config) {
     if (!Array.isArray(config.scopes)) {
       issues.push('scopes must be an array');
@@ -155,7 +162,10 @@ export function normalizeConfig(config) {
         : DEFAULT_BRANCH_PREFIX,
     defaultBranch:
       typeof config.defaultBranch === 'string' ? config.defaultBranch.trim() : '',
-    protectedBranches: normalizeArray(config.protectedBranches)
+    protectedBranches: normalizeArray(config.protectedBranches),
+    pythonZeroMajor: ['minor', 'patch', 'skip'].includes(config.pythonZeroMajor)
+      ? config.pythonZeroMajor
+      : 'minor'
   };
 }
 

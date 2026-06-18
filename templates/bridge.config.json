@@ -9,5 +9,6 @@
   ],
   "beforeScripts": [],
   "afterScripts": [],
-  "branchPrefix": "bridge/patch"
+  "branchPrefix": "bridge/patch",
+  "pythonZeroMajor": "minor"
 }

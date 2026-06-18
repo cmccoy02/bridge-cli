@@ -131,13 +131,15 @@ function buildPatchScopes(config) {
     updateCommand: config.updateCommand,
     cleanCommands: Array.isArray(config.cleanCommands) ? config.cleanCommands : [],
     beforeScripts: Array.isArray(config.beforeScripts) ? config.beforeScripts : [],
-    afterScripts: Array.isArray(config.afterScripts) ? config.afterScripts : []
+    afterScripts: Array.isArray(config.afterScripts) ? config.afterScripts : [],
+    pythonZeroMajor: config.pythonZeroMajor || 'minor'
   };
 
   const nestedScopes = Array.isArray(config.scopes)
     ? config.scopes.map((scope) => ({
         ...scope,
-        path: normalizeScopePath(scope.path)
+        path: normalizeScopePath(scope.path),
+        pythonZeroMajor: scope.pythonZeroMajor || config.pythonZeroMajor || 'minor'
       }))
     : [];
 
@@ -378,7 +380,8 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName }) {
       if (updateStrategy === 'python-requirements-wildcard') {
         return runPythonRequirementsWildcardUpdate({
           cwd: scopeDir,
-          runId: `${run.runId}-${label}`
+          runId: `${run.runId}-${label}`,
+          zeroMajorPolicy: scope.pythonZeroMajor || 'minor'
         });
       }
 
