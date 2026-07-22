@@ -132,7 +132,7 @@ function buildPatchScopes(config) {
     cleanCommands: Array.isArray(config.cleanCommands) ? config.cleanCommands : [],
     beforeScripts: Array.isArray(config.beforeScripts) ? config.beforeScripts : [],
     afterScripts: Array.isArray(config.afterScripts) ? config.afterScripts : [],
-    pythonZeroMajor: config.pythonZeroMajor || 'minor'
+    pythonZeroMajor: config.pythonZeroMajor || 'skip'
   };
 
   const nestedScopes = Array.isArray(config.scopes)

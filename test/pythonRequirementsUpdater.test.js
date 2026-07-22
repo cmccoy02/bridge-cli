@@ -8,7 +8,7 @@ import {
 } from '../src/core/pythonRequirementsUpdater.js';
 
 describe('python requirements wildcard updater', () => {
-  it('wildcards clean numeric pins at the major position, including 0.x by default', () => {
+  it('wildcards non-zero majors and skips 0.x by default (byte-identical)', () => {
     const original = [
       '# comment',
       '',
@@ -30,15 +30,16 @@ describe('python requirements wildcard updater', () => {
 
     const prepared = prepareWildcardRequirements(original);
 
-    assert.equal(prepared.skippedZeroMajor, 0);
-    assert.equal(prepared.updatablePins.length, 5);
+    // 0.x (httpx) is skipped by default and left byte-identical.
+    assert.equal(prepared.skippedZeroMajor, 1);
+    assert.equal(prepared.updatablePins.length, 4);
     assert.equal(
       prepared.content,
       [
         '# comment',
         '',
         'requests==2.*',
-        'httpx==0.*',
+        'httpx==0.23.0',
         'click==7.*',
         'urllib3==2.*',
         'pkg[crypto]==1.*',
@@ -53,6 +54,16 @@ describe('python requirements wildcard updater', () => {
         ''
       ].join('\n')
     );
+  });
+
+  it('still wildcards 0.x at the major position under the explicit "minor" policy', () => {
+    const prepared = prepareWildcardRequirements('httpx==0.23.0\n', {
+      zeroMajorPolicy: 'minor'
+    });
+
+    assert.equal(prepared.content, 'httpx==0.*\n');
+    assert.equal(prepared.updatablePins.length, 1);
+    assert.equal(prepared.skippedZeroMajor, 0);
   });
 
   it('treats 0.x with policy "patch" by keeping major+minor and wildcarding the patch', () => {
@@ -83,7 +94,8 @@ describe('python requirements wildcard updater', () => {
       'marker==1.2.3; python_version < "3.9"',
       ''
     ].join('\n');
-    const prepared = prepareWildcardRequirements(original);
+    // Explicit "minor" policy so the 0.x httpx pin participates in the projection.
+    const prepared = prepareWildcardRequirements(original, { zeroMajorPolicy: 'minor' });
     const resolved = [
       'httpx==0.28.1',
       'pkg==1.4.0',
@@ -116,7 +128,7 @@ describe('python requirements wildcard updater', () => {
 
   it('preserves CRLF newline style per line on re-pin', () => {
     const original = 'requests==2.31.0\r\nhttpx==0.23.0\n';
-    const prepared = prepareWildcardRequirements(original);
+    const prepared = prepareWildcardRequirements(original, { zeroMajorPolicy: 'minor' });
     const resolved = 'httpx==0.28.1\nrequests==2.32.5\n';
 
     const final = buildResolvedRequirementsContent(
@@ -130,7 +142,7 @@ describe('python requirements wildcard updater', () => {
 
   it('prefix guard accepts a resolved version inside the 0.x lane', () => {
     const original = 'httpx==0.23.0\n';
-    const prepared = prepareWildcardRequirements(original);
+    const prepared = prepareWildcardRequirements(original, { zeroMajorPolicy: 'minor' });
 
     const final = buildResolvedRequirementsContent(
       original,
@@ -143,7 +155,7 @@ describe('python requirements wildcard updater', () => {
 
   it('prefix guard rejects a 0.x pin that resolves across the major boundary', () => {
     const original = 'httpx==0.23.0\n';
-    const prepared = prepareWildcardRequirements(original);
+    const prepared = prepareWildcardRequirements(original, { zeroMajorPolicy: 'minor' });
 
     assert.throws(
       () =>

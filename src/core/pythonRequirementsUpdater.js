@@ -15,8 +15,11 @@ const CLEAN_EXACT_PIN =
 
 const ZERO_MAJOR_POLICIES = ['minor', 'patch', 'skip'];
 
+// TODO(0.x): 0.x handling is deferred this sprint — skipping is the safe default
+// so pip never receives a `0.*` wildcard that could jump a pre-1.0 major. The
+// `minor`/`patch` branches in computeWildcard remain wired for when 0.x lands.
 export function normalizeZeroMajorPolicy(policy) {
-  return ZERO_MAJOR_POLICIES.includes(policy) ? policy : 'minor';
+  return ZERO_MAJOR_POLICIES.includes(policy) ? policy : 'skip';
 }
 
 function quote(value) {
@@ -282,19 +285,20 @@ export function buildResolvedRequirementsContent(originalContent, resolvedConten
   };
 }
 
-// uv (through its pip interface) phrases an unsatisfiable resolve a few ways,
-// e.g. "there is no version of <name>==<ver>", "<name> was not found in the
-// package registry", "only <name><=X is available", and "you require
-// <name>==...". Extract the offending package names from whichever wording uv
-// used so we can name the original pin the user wrote.
+// pip phrases an unsatisfiable resolve a few ways, e.g.
+//   "Could not find a version that satisfies the requirement <name>==..."
+//   "No matching distribution found for <name>==..."
+//   "Cannot install <name>... because these package versions have conflicting..."
+// Extract the offending package names from whichever wording pip used so we can
+// name the original pin the user wrote.
 function extractUnsatisfiableNames(stderr) {
   const text = String(stderr || '');
   const names = new Set();
   const patterns = [
-    /there is no version of\s+([A-Za-z0-9][A-Za-z0-9._-]*)/gi,
-    /\bBecause\s+([A-Za-z0-9][A-Za-z0-9._-]*)\s+was not found in the package registry/gi,
-    /\bonly\s+([A-Za-z0-9][A-Za-z0-9._-]*)\s*[<>=!~]/gi,
-    /\byou require\s+([A-Za-z0-9][A-Za-z0-9._-]*)\s*[<>=!~]/gi
+    /Could not find a version that satisfies the requirement\s+([A-Za-z0-9][A-Za-z0-9._-]*)/gi,
+    /No matching distribution found for\s+([A-Za-z0-9][A-Za-z0-9._-]*)/gi,
+    /\bCannot install\s+([A-Za-z0-9][A-Za-z0-9._-]*)/gi,
+    /\bThe conflict is caused by:[\s\S]*?\bThe user requested\s+([A-Za-z0-9][A-Za-z0-9._-]*)/gi
   ];
 
   for (const pattern of patterns) {
@@ -315,12 +319,21 @@ function firstStderrLine(stderr) {
     .find((line) => line.length > 0) || 'unknown resolver error';
 }
 
+// `pip check` reports conflicting/missing dependencies on stdout (not stderr) and
+// exits non-zero. Surface those lines verbatim so the failure names the packages.
+function buildCheckError(stdout, stderr, requirementsFile) {
+  const details = firstStderrLine(`${String(stdout || '')}\n${String(stderr || '')}`);
+  return new Error(
+    `Dependency verification (pip check) failed for ${requirementsFile}: ${details} (file left unchanged).`
+  );
+}
+
 function buildResolveError(stderr, requirementsFile, updatablePins) {
   const names = extractUnsatisfiableNames(stderr);
   const normalizedNames = new Set(names.map((name) => normalizePythonName(name)));
 
   // Prefer naming the original pins we actually transformed; this filters out
-  // any transitive packages uv may mention in a long error trace.
+  // any transitive packages pip may mention in a long error trace.
   const offending = updatablePins
     .filter((pin) => normalizedNames.has(pin.normalizedName))
     .map((pin) => `${pin.requirement}==${pin.version}`);
@@ -366,7 +379,7 @@ export async function runPythonRequirementsWildcardUpdate({
   cwd,
   runId,
   requirementsFile = 'requirements.txt',
-  zeroMajorPolicy = 'minor'
+  zeroMajorPolicy = 'skip'
 }) {
   const requirementsPath = path.join(cwd, requirementsFile);
   const originalContent = await fs.readFile(requirementsPath, 'utf8');
@@ -375,58 +388,62 @@ export async function runPythonRequirementsWildcardUpdate({
     os.tmpdir(),
     `bridge.${String(runId || Date.now()).replace(/[^A-Za-z0-9._-]+/g, '-')}`
   );
-  const tempInputPath = `${tempBase}.requirements.in`;
-  const resolvedOutputPath = `${tempBase}.resolved.txt`;
-  const verifyOutputPath = `${tempBase}.verify.txt`;
+  // The Bridge-generated wildcards file: a temporary copy with each clean pin
+  // rewritten to a single-major `X.*`. The real requirements.txt is never mutated
+  // until the resolve + verify both pass.
+  const wildcardsPath = `${tempBase}.wildcards.in`;
   const venvPath = path.join(cwd, '.bridge-venv');
-  const venvPython = path.join(venvPath, 'bin', 'python');
+  // Invoke the venv's own pip binary directly — no `pip install --python <path>`.
+  const venvPip = path.join(venvPath, 'bin', 'pip');
 
   try {
-    await fs.writeFile(tempInputPath, prepared.content, 'utf8');
-    await fs.rm(venvPath, { recursive: true, force: true });
-    await runCommand(`uv venv ${quote(venvPath)}`, { cwd, quiet: true });
+    await fs.writeFile(wildcardsPath, prepared.content, 'utf8');
 
+    // Lifecycle: clean → create venv, guaranteed in that order so `.bridge-venv`
+    // always exists before the install step references it.
+    await fs.rm(venvPath, { recursive: true, force: true });
+    await runCommand(`python3 -m venv ${quote(venvPath)}`, { cwd, quiet: true });
+
+    // Install the whole wildcard set at once; pip 20.3+ resolves it together.
     try {
-      await runCommand(`uv pip compile ${quote(tempInputPath)} -o ${quote(resolvedOutputPath)}`, {
+      await runCommand(`${quote(venvPip)} install -U -r ${quote(wildcardsPath)}`, {
         cwd,
         quiet: true
       });
-    } catch (compileError) {
-      if (compileError instanceof CommandExecutionError) {
-        throw buildResolveError(compileError.stderr, requirementsFile, prepared.updatablePins);
+    } catch (installError) {
+      if (installError instanceof CommandExecutionError) {
+        throw buildResolveError(
+          `${installError.stderr}\n${installError.stdout}`,
+          requirementsFile,
+          prepared.updatablePins
+        );
       }
 
-      throw compileError;
+      throw installError;
     }
 
-    const resolvedContent = await fs.readFile(resolvedOutputPath, 'utf8');
+    // Verify no internal conflicts. If pip check fails we abort and write nothing.
+    try {
+      await runCommand(`${quote(venvPip)} check`, { cwd, quiet: true });
+    } catch (checkError) {
+      if (checkError instanceof CommandExecutionError) {
+        throw buildCheckError(checkError.stdout, checkError.stderr, requirementsFile);
+      }
+
+      throw checkError;
+    }
+
+    // Capture the fully-resolved, exact versions pip settled on.
+    const freezeResult = await runCommand(`${quote(venvPip)} freeze`, { cwd, quiet: true });
     const resolved = buildResolvedRequirementsContent(
       originalContent,
-      resolvedContent,
+      freezeResult.stdout,
       prepared.updatablePins
     );
 
-    await fs.writeFile(verifyOutputPath, resolved.content, 'utf8');
-
-    try {
-      await runCommand(`uv pip install --python ${quote(venvPython)} -r ${quote(verifyOutputPath)}`, {
-        cwd,
-        quiet: true
-      });
-      await runCommand(`uv pip check --python ${quote(venvPython)}`, {
-        cwd,
-        quiet: true
-      });
-    } catch (verifyError) {
-      if (verifyError instanceof CommandExecutionError) {
-        throw buildResolveError(verifyError.stderr, requirementsFile, prepared.updatablePins);
-      }
-
-      throw verifyError;
-    }
-
     // TODO(verify): run project tests inside the venv once Bridge has a configured test hook.
-    // Only written once compile + verify both pass.
+    // Only written once install + check both pass. Written programmatically (no shell
+    // redirection) to avoid the zsh `noclobber` silent no-write.
     await fs.writeFile(requirementsPath, resolved.content, 'utf8');
 
     return {
@@ -450,9 +467,8 @@ export async function runPythonRequirementsWildcardUpdate({
       }
     };
   } finally {
+    // Teardown: always remove the ephemeral venv and the generated wildcards file.
     await fs.rm(venvPath, { recursive: true, force: true });
-    await fs.rm(tempInputPath, { force: true });
-    await fs.rm(resolvedOutputPath, { force: true });
-    await fs.rm(verifyOutputPath, { force: true });
+    await fs.rm(wildcardsPath, { force: true });
   }
 }

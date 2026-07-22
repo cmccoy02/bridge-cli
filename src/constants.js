@@ -75,10 +75,21 @@ export const PACKAGE_MANAGER_PRESETS = {
   },
   pip: {
     label: 'Python project using requirements.txt',
-    binary: 'uv',
-    installCommand: 'uv pip install --python .bridge-venv/bin/python -r requirements.txt',
-    updateCommand: 'uv pip compile bridge-generated-requirements.in -o bridge-verified-requirements.txt',
-    cleanCommands: ['rm -rf .bridge-venv', 'uv venv .bridge-venv'],
+    // pip-first: every command below targets Bridge's own ephemeral `.bridge-venv`
+    // created from the standard-library `venv` module. No uv, no third-party tool.
+    // NOTE(deferred): POSIX venv paths only (`.bridge-venv/bin/...`); Windows
+    // (`.bridge-venv/Scripts/...`) is not handled yet.
+    binary: 'python3',
+    // Call the venv's own pip DIRECTLY (never `pip install --python <path>`, which
+    // mis-parses the flag placement and produced the "invalid requirement" errors).
+    installCommand: '.bridge-venv/bin/pip install -U -r requirements.txt',
+    // Cosmetic: the real re-pin runs through the `python-requirements-wildcard`
+    // strategy below (which short-circuits this string). `pip freeze` is the step
+    // that captures the resolved pins.
+    updateCommand: '.bridge-venv/bin/pip freeze',
+    // Clean then create the venv, in that order, so `.bridge-venv` always exists
+    // before any install step references it. Consistently `.bridge-venv` (never `.venv`).
+    cleanCommands: ['rm -rf .bridge-venv', 'python3 -m venv .bridge-venv'],
     updateStrategy: 'python-requirements-wildcard',
     lockfile: null,
     lockfileFormat: null,

@@ -163,9 +163,11 @@ export function normalizeConfig(config) {
     defaultBranch:
       typeof config.defaultBranch === 'string' ? config.defaultBranch.trim() : '',
     protectedBranches: normalizeArray(config.protectedBranches),
+    // 0.x handling is deferred: skip pre-1.0 pins by default so Bridge never opens
+    // a `0.*` wildcard. `minor`/`patch` stay selectable for when 0.x lands.
     pythonZeroMajor: ['minor', 'patch', 'skip'].includes(config.pythonZeroMajor)
       ? config.pythonZeroMajor
-      : 'minor'
+      : 'skip'
   };
 }
 
