@@ -80,6 +80,20 @@ function buildEmptyReport() {
       major: 0,
       other: 0
     },
+    security: {
+      auditedScopes: 0,
+      beforeTotal: 0,
+      afterTotal: 0,
+      fixed: 0,
+      introduced: 0
+    },
+    bundles: {
+      checkedScopes: 0,
+      increased: 0,
+      decreased: 0,
+      unchanged: 0,
+      thresholdExceeded: 0
+    },
     packages: [],
     repos: []
   };
@@ -92,9 +106,73 @@ function buildReport(entries, { repoFilter = '', limit = 10 } = {}) {
     : entries;
   const depDeltas = scopedEntries.filter((entry) => entry.event === 'dep_delta');
   const depSummaries = scopedEntries.filter((entry) => entry.event === 'dep_delta_summary');
+  const auditEvents = scopedEntries.filter(
+    (entry) =>
+      entry.event === 'phase' &&
+      typeof entry.phase === 'string' &&
+      (entry.phase.startsWith('audit_before:') || entry.phase.startsWith('audit_after:')) &&
+      entry.counts &&
+      typeof entry.counts === 'object'
+  );
+  const bundleEvents = scopedEntries.filter(
+    (entry) =>
+      entry.event === 'phase' &&
+      typeof entry.phase === 'string' &&
+      entry.phase.startsWith('bundle_comparison:') &&
+      typeof entry.deltaBytes === 'number'
+  );
   const runIds = new Set();
   const repos = new Set();
   const packageRollup = new Map();
+  const auditsByRunScope = new Map();
+
+  for (const auditEvent of auditEvents) {
+    const scope = auditEvent.scope || auditEvent.phase.split(':').slice(1).join(':');
+    const key = `${auditEvent.runId || 'unknown'}::${scope}`;
+    const pair = auditsByRunScope.get(key) || {};
+
+    if (auditEvent.phase.startsWith('audit_before:')) {
+      pair.before = auditEvent.counts;
+    } else {
+      pair.after = auditEvent.counts;
+    }
+
+    auditsByRunScope.set(key, pair);
+  }
+
+  for (const pair of auditsByRunScope.values()) {
+    if (!pair.before || !pair.after) {
+      continue;
+    }
+
+    const beforeTotal = Number(pair.before.total) || 0;
+    const afterTotal = Number(pair.after.total) || 0;
+    report.security.auditedScopes += 1;
+    report.security.beforeTotal += beforeTotal;
+    report.security.afterTotal += afterTotal;
+
+    if (afterTotal < beforeTotal) {
+      report.security.fixed += beforeTotal - afterTotal;
+    } else if (afterTotal > beforeTotal) {
+      report.security.introduced += afterTotal - beforeTotal;
+    }
+  }
+
+  for (const bundleEvent of bundleEvents) {
+    report.bundles.checkedScopes += 1;
+
+    if (bundleEvent.deltaBytes > 0) {
+      report.bundles.increased += 1;
+    } else if (bundleEvent.deltaBytes < 0) {
+      report.bundles.decreased += 1;
+    } else {
+      report.bundles.unchanged += 1;
+    }
+
+    if (bundleEvent.thresholdExceeded) {
+      report.bundles.thresholdExceeded += 1;
+    }
+  }
 
   for (const summary of depSummaries) {
     if (summary.runId) {
@@ -230,6 +308,8 @@ function printHumanReport(report, { repoFilter = '', limit = 10 } = {}) {
       `Changed packages: ${report.totals.changed}`,
       `Direct/transitive ratio: ${formatDirectRatio(report)}`,
       `Bumps: patch ${report.byBump.patch}, minor ${report.byBump.minor}, major ${report.byBump.major}, other ${report.byBump.other}`,
+      `Security: ${report.security.auditedScopes} audited scopes, ${report.security.fixed} fixed, ${report.security.introduced} introduced`,
+      `Bundles: ${report.bundles.checkedScopes} checked, ${report.bundles.increased} increased, ${report.bundles.decreased} decreased, ${report.bundles.thresholdExceeded} over threshold`,
       repoFilter ? `Repo filter: ${repoFilter}` : `Repos tracked: ${report.repos.length}`
     ],
     'Bridge report'

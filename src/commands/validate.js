@@ -15,7 +15,8 @@ function firstToken(commandString) {
     return '';
   }
 
-  return commandString.trim().split(/\s+/)[0];
+  const tokens = commandString.trim().split(/\s+/);
+  return tokens.find((token) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) || '';
 }
 
 function quote(value) {
@@ -25,7 +26,7 @@ function quote(value) {
 async function ensureBinary(commandString, contextLabel, issues) {
   const binary = firstToken(commandString);
 
-  if (!binary) {
+  if (!binary || binary.startsWith('.bridge-venv/')) {
     return;
   }
 
@@ -69,6 +70,12 @@ export async function validateCommand({ cwd = process.cwd(), offline = false } =
 
     await ensureBinary(config.installCommand, 'installCommand', issues);
     await ensureBinary(config.updateCommand, 'updateCommand', issues);
+    await ensureBinary(config.auditCommand, 'auditCommand', issues);
+    await ensureBinary(
+      config.bundleAnalysis?.command,
+      'bundleAnalysis.command',
+      issues
+    );
 
     for (const cleanCommand of commandList(config.cleanCommands)) {
       await ensureBinary(cleanCommand, 'cleanCommands', issues);
@@ -87,6 +94,12 @@ export async function validateCommand({ cwd = process.cwd(), offline = false } =
         const scopeName = scope.path || '.';
         await ensureBinary(scope.installCommand, `scopes(${scopeName}).installCommand`, issues);
         await ensureBinary(scope.updateCommand, `scopes(${scopeName}).updateCommand`, issues);
+        await ensureBinary(scope.auditCommand, `scopes(${scopeName}).auditCommand`, issues);
+        await ensureBinary(
+          scope.bundleAnalysis?.command,
+          `scopes(${scopeName}).bundleAnalysis.command`,
+          issues
+        );
 
         for (const scopeCleanCommand of commandList(scope.cleanCommands)) {
           await ensureBinary(scopeCleanCommand, `scopes(${scopeName}).cleanCommands`, issues);

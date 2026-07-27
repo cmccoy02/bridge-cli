@@ -16,6 +16,10 @@ const packageJson = require('../package.json');
 
 const program = new Command();
 
+function collectOption(value, previous = []) {
+  return [...previous, value];
+}
+
 program
   .name('bridge')
   .description('Automated, non-breaking dependency updates. One command. One PR.')
@@ -34,8 +38,24 @@ program
 program
   .command('patch')
   .description('Copy, patch dependencies, and push a PR branch')
-  .action(async () => {
-    const ok = await patchCommand();
+  .option('--dry-run', 'Run the full patch and validation flow without committing or pushing')
+  .option('--keep-workspace', 'Keep the isolated workspace after a dry run for debugging')
+  .option('--verbose', 'Stream command output while each phase runs')
+  .option('--scope <path>', 'Run only the root (.) or one configured nested scope')
+  .option(
+    '--local-package <name=path>',
+    'Use a local npm package only inside the isolated run (repeatable)',
+    collectOption,
+    []
+  )
+  .action(async (options) => {
+    const ok = await patchCommand({
+      dryRun: options.dryRun,
+      keepWorkspace: options.keepWorkspace,
+      verbose: options.verbose,
+      scope: options.scope,
+      localPackages: options.localPackage
+    });
     if (!ok) {
       process.exitCode = 1;
     }

@@ -122,6 +122,19 @@ export async function initCommand({ cwd = process.cwd() } = {}) {
         },
         {
           type: 'text',
+          name: 'bundleAnalysisCommand',
+          message: 'Visualizer build command (optional)',
+          initial: ''
+        },
+        {
+          type: (_, responses) =>
+            responses.bundleAnalysisCommand?.trim() ? 'text' : null,
+          name: 'bundleAnalysisReportPath',
+          message: 'Visualizer HTML report path',
+          initial: 'dist/analyze.html'
+        },
+        {
+          type: 'text',
           name: 'branchPrefix',
           message: 'Branch prefix',
           initial: DEFAULT_BRANCH_PREFIX
@@ -142,8 +155,21 @@ export async function initCommand({ cwd = process.cwd() } = {}) {
       cleanCommands: parseCommandList(detailResponses.cleanCommands, managerPreset.cleanCommands),
       beforeScripts: parseCommandList(detailResponses.beforeScripts, []),
       afterScripts: parseCommandList(detailResponses.afterScripts, []),
+      auditCommand: managerPreset.auditCommand || '',
+      blockOnNewVulnerabilities: true,
+      allowMajorUpdates: false,
       branchPrefix: (detailResponses.branchPrefix || DEFAULT_BRANCH_PREFIX).trim()
     };
+
+    if (detailResponses.bundleAnalysisCommand?.trim()) {
+      config.bundleAnalysis = {
+        command: detailResponses.bundleAnalysisCommand.trim(),
+        reportPath:
+          detailResponses.bundleAnalysisReportPath?.trim() || 'dist/analyze.html',
+        metric: 'brotli',
+        maxIncreasePercent: 5
+      };
+    }
 
     const detectedRepoUrl = (detected.repoUrl || '').trim();
 

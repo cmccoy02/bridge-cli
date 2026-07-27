@@ -38,7 +38,8 @@ function addVersionEntry(map, normalizedName, name, version) {
 
   map.set(normalizedName, {
     name: String(name || normalizedName).trim(),
-    version: String(version).trim()
+    version: String(version).trim(),
+    normalizedName
   });
 }
 
@@ -102,7 +103,13 @@ function parseNpmLockfile(content) {
           ? details.name.trim()
           : nameFromNpmPackagePath(packagePath);
       const normalized = normalizeName(rawName, 'json-npm');
-      addVersionEntry(map, normalized, rawName, details.version);
+      map.set(packagePath, {
+        name: rawName,
+        version: String(details.version).trim(),
+        normalizedName: normalized,
+        directEligible: packagePath === `node_modules/${rawName}`,
+        dependencyPath: packagePath
+      });
     }
 
     return map;
@@ -785,18 +792,23 @@ export function computeDepDeltas({
   const deltas = [];
   const keys = new Set([...beforeMap.keys(), ...afterMap.keys()]);
 
-  for (const normalizedName of keys) {
-    const fromEntry = beforeMap.get(normalizedName);
-    const toEntry = afterMap.get(normalizedName);
+  for (const mapKey of keys) {
+    const fromEntry = beforeMap.get(mapKey);
+    const toEntry = afterMap.get(mapKey);
 
     if (fromEntry && toEntry && fromEntry.version === toEntry.version) {
       continue;
     }
 
+    const normalizedName =
+      toEntry?.normalizedName || fromEntry?.normalizedName || mapKey;
+    const npmDirectEligible =
+      lockfileFormat !== 'json-npm' ||
+      Boolean(toEntry?.directEligible || fromEntry?.directEligible);
     const kind = classifyDeltaKind({
       normalizedName,
       lockfileFormat,
-      directDeps,
+      directDeps: npmDirectEligible ? directDeps : new Set(),
       beforeViaByPackage,
       afterViaByPackage
     });
@@ -834,7 +846,9 @@ export function computeDepDeltas({
       from: fromVersion,
       to: toVersion,
       bump,
-      kind
+      kind,
+      dependencyPath:
+        toEntry?.dependencyPath || fromEntry?.dependencyPath || null
     });
   }
 

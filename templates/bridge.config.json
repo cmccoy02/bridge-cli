@@ -9,6 +9,19 @@
   ],
   "beforeScripts": [],
   "afterScripts": [],
+  "auditCommand": "npm audit --package-lock-only --json",
+  "blockOnNewVulnerabilities": true,
+  "allowMajorUpdates": false,
+  "bundleAnalysis": {
+    "command": "ANALYZE=true npm run build",
+    "reportPath": "dist/analyze.html",
+    "metric": "brotli",
+    "maxIncreasePercent": 5
+  },
   "branchPrefix": "bridge/patch",
+  "defaultBranch": "main",
+  "protectedBranches": [
+    "main"
+  ],
   "pythonZeroMajor": "skip"
 }
