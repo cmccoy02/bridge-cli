@@ -5,6 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { cleanupLocalConfigAfterSuccessfulPush } from '../src/core/configLifecycle.js';
+import { patchCommand } from '../src/commands/patch.js';
 import { runCommand } from '../src/core/executor.js';
 import { getCurrentBranch, prepareCleanBase, pushBridgeBranch } from '../src/core/git.js';
 
@@ -187,4 +188,86 @@ test('cleanupLocalConfigAfterSuccessfulPush keeps a config path that appears in 
   assert.equal(result.removed, false);
   assert.equal(result.reason, 'tracked_or_history');
   assert.equal(await pathExists(configPath), true);
+});
+
+test('patch dry-run executes in isolation without creating a commit or remote branch', async (t) => {
+  const { repoDir, defaultBranch } = await createRepoWithOrigin(t, {
+    defaultBranch: 'main'
+  });
+  const originalHead = (await git(repoDir, 'rev-parse HEAD')).stdout.trim();
+  const auditJson = JSON.stringify({
+    metadata: {
+      vulnerabilities: {
+        info: 0,
+        low: 0,
+        moderate: 0,
+        high: 0,
+        critical: 0,
+        total: 0
+      }
+    }
+  });
+  const config = {
+    name: 'dry-run-fixture',
+    packageManager: 'npm',
+    installCommand: 'node -e "process.exit(0)"',
+    updateCommand:
+      'node -e "const fs=require(\'fs\');const p=JSON.parse(fs.readFileSync(\'package-lock.json\',\'utf8\'));p.packages[\'node_modules/example\'].version=\'1.0.1\';fs.writeFileSync(\'package-lock.json\',JSON.stringify(p,null,2)+\'\\\\n\')"',
+    cleanCommands: [],
+    beforeScripts: ['node -e "process.exit(0)"'],
+    afterScripts: ['node -e "process.exit(0)"'],
+    auditCommand: `node -e 'console.log(${JSON.stringify(auditJson)})'`,
+    blockOnNewVulnerabilities: true,
+    branchPrefix: 'bridge/test',
+    defaultBranch
+  };
+  const packageJson = {
+    name: 'fixture',
+    dependencies: {
+      example: '^1.0.0'
+    }
+  };
+  const packageLock = {
+    name: 'fixture',
+    lockfileVersion: 3,
+    packages: {
+      '': {
+        name: 'fixture',
+        dependencies: {
+          example: '^1.0.0'
+        }
+      },
+      'node_modules/example': {
+        version: '1.0.0'
+      }
+    }
+  };
+
+  await fs.writeFile(
+    path.join(repoDir, 'package.json'),
+    `${JSON.stringify(packageJson, null, 2)}\n`,
+    'utf8'
+  );
+  await fs.writeFile(
+    path.join(repoDir, 'package-lock.json'),
+    `${JSON.stringify(packageLock, null, 2)}\n`,
+    'utf8'
+  );
+  await fs.writeFile(
+    path.join(repoDir, 'bridge.config.json'),
+    `${JSON.stringify(config, null, 2)}\n`,
+    'utf8'
+  );
+  await git(repoDir, 'add package.json package-lock.json bridge.config.json');
+  await git(repoDir, 'commit -m "add bridge dry-run fixture"');
+  await git(repoDir, 'push origin main');
+  const headBeforeDryRun = (await git(repoDir, 'rev-parse HEAD')).stdout.trim();
+
+  assert.notEqual(headBeforeDryRun, originalHead);
+  assert.equal(await patchCommand({ cwd: repoDir, dryRun: true }), true);
+  assert.equal((await git(repoDir, 'rev-parse HEAD')).stdout.trim(), headBeforeDryRun);
+  assert.equal(await getCurrentBranch(repoDir), 'main');
+
+  const remoteBridgeBranches = await git(repoDir, 'ls-remote --heads origin bridge/test-*');
+  assert.equal(remoteBridgeBranches.stdout.trim(), '');
 });

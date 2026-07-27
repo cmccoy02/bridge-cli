@@ -14,6 +14,7 @@ export const PACKAGE_MANAGER_PRESETS = {
     installCommand: 'npm install',
     updateCommand: 'npm update',
     cleanCommands: ['rm -rf node_modules', 'rm -f package-lock.json'],
+    auditCommand: 'npm audit --package-lock-only --json',
     lockfile: 'package-lock.json',
     lockfileFormat: 'json-npm',
     manifest: 'package.json'
@@ -126,5 +127,8 @@ export const DEFAULT_CONFIG = {
   cleanCommands: [...PACKAGE_MANAGER_PRESETS.npm.cleanCommands],
   beforeScripts: [],
   afterScripts: [],
+  auditCommand: PACKAGE_MANAGER_PRESETS.npm.auditCommand,
+  blockOnNewVulnerabilities: true,
+  allowMajorUpdates: false,
   branchPrefix: DEFAULT_BRANCH_PREFIX
 };

@@ -121,6 +121,16 @@ export async function getOriginUrl(cwd) {
   return origin.refs.push || origin.refs.fetch || '';
 }
 
+export async function setOriginUrl(cwd, originUrl) {
+  const normalized = typeof originUrl === 'string' ? originUrl.trim() : '';
+
+  if (!normalized) {
+    return;
+  }
+
+  await getGit(cwd).remote(['set-url', 'origin', normalized]);
+}
+
 export async function cleanWorkingTree(cwd) {
   const git = getGit(cwd);
   await git.raw(['reset', '--hard', 'HEAD']);

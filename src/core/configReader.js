@@ -31,6 +31,24 @@ function normalizeArray(value) {
     .filter((entry) => entry.length > 0);
 }
 
+function normalizeBundleAnalysis(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+
+  return {
+    command: typeof value.command === 'string' ? value.command.trim() : '',
+    reportPath: typeof value.reportPath === 'string' ? value.reportPath.trim() : '',
+    metric: ['rendered', 'gzip', 'brotli'].includes(value.metric)
+      ? value.metric
+      : 'brotli',
+    maxIncreasePercent:
+      typeof value.maxIncreasePercent === 'number' ? value.maxIncreasePercent : 5,
+    maxIncreaseBytes:
+      typeof value.maxIncreaseBytes === 'number' ? value.maxIncreaseBytes : null
+  };
+}
+
 function normalizeScope(scope) {
   if (!scope || typeof scope !== 'object' || Array.isArray(scope)) {
     return null;
@@ -46,8 +64,33 @@ function normalizeScope(scope) {
       typeof scope.updateCommand === 'string' ? scope.updateCommand.trim() : '',
     cleanCommands: normalizeArray(scope.cleanCommands),
     beforeScripts: normalizeArray(scope.beforeScripts),
-    afterScripts: normalizeArray(scope.afterScripts)
+    afterScripts: normalizeArray(scope.afterScripts),
+    auditCommand:
+      typeof scope.auditCommand === 'string' ? scope.auditCommand.trim() : '',
+    blockOnNewVulnerabilities:
+      typeof scope.blockOnNewVulnerabilities === 'boolean'
+        ? scope.blockOnNewVulnerabilities
+        : undefined,
+    allowMajorUpdates:
+      typeof scope.allowMajorUpdates === 'boolean' ? scope.allowMajorUpdates : undefined,
+    bundleAnalysis: normalizeBundleAnalysis(scope.bundleAnalysis),
+    pythonZeroMajor: ['minor', 'patch', 'skip'].includes(scope.pythonZeroMajor)
+      ? scope.pythonZeroMajor
+      : undefined
   };
+}
+
+function isSafeScopePath(scopePath) {
+  if (isBlankString(scopePath) || path.isAbsolute(scopePath)) {
+    return false;
+  }
+
+  const normalized = path.normalize(scopePath.trim());
+  return (
+    normalized !== '..' &&
+    !normalized.startsWith(`..${path.sep}`) &&
+    normalized !== path.sep
+  );
 }
 
 function findMissingFields(config) {
@@ -75,6 +118,43 @@ function findMissingFields(config) {
   return missing;
 }
 
+function validateBundleAnalysis(value, label, issues) {
+  if (value === undefined || value === null) {
+    return;
+  }
+
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    issues.push(`${label} must be an object`);
+    return;
+  }
+
+  if (isBlankString(value.command)) {
+    issues.push(`${label}.command is required`);
+  }
+
+  if (!isSafeScopePath(value.reportPath)) {
+    issues.push(`${label}.reportPath must be a relative path inside the scope`);
+  }
+
+  if (
+    'metric' in value &&
+    !['rendered', 'gzip', 'brotli'].includes(value.metric)
+  ) {
+    issues.push(`${label}.metric must be "rendered", "gzip", or "brotli"`);
+  }
+
+  for (const threshold of ['maxIncreasePercent', 'maxIncreaseBytes']) {
+    if (
+      threshold in value &&
+      (typeof value[threshold] !== 'number' ||
+        !Number.isFinite(value[threshold]) ||
+        value[threshold] < 0)
+    ) {
+      issues.push(`${label}.${threshold} must be a non-negative number`);
+    }
+  }
+}
+
 function findShapeIssues(config) {
   const issues = [];
 
@@ -89,6 +169,23 @@ function findShapeIssues(config) {
   if ('afterScripts' in config && !Array.isArray(config.afterScripts)) {
     issues.push('afterScripts must be an array of shell commands');
   }
+
+  if ('auditCommand' in config && typeof config.auditCommand !== 'string') {
+    issues.push('auditCommand must be a shell command string');
+  }
+
+  if (
+    'blockOnNewVulnerabilities' in config &&
+    typeof config.blockOnNewVulnerabilities !== 'boolean'
+  ) {
+    issues.push('blockOnNewVulnerabilities must be true or false');
+  }
+
+  if ('allowMajorUpdates' in config && typeof config.allowMajorUpdates !== 'boolean') {
+    issues.push('allowMajorUpdates must be true or false');
+  }
+
+  validateBundleAnalysis(config.bundleAnalysis, 'bundleAnalysis', issues);
 
   if ('protectedBranches' in config && !Array.isArray(config.protectedBranches)) {
     issues.push('protectedBranches must be an array of branch names');
@@ -109,14 +206,28 @@ function findShapeIssues(config) {
     if (!Array.isArray(config.scopes)) {
       issues.push('scopes must be an array');
     } else {
+      const normalizedPaths = new Set();
+
       config.scopes.forEach((scope, index) => {
         if (!scope || typeof scope !== 'object' || Array.isArray(scope)) {
           issues.push(`scopes[${index}] must be an object`);
           return;
         }
 
-        if (isBlankString(scope.path)) {
-          issues.push(`scopes[${index}].path is required`);
+        if (!isSafeScopePath(scope.path)) {
+          issues.push(
+            `scopes[${index}].path must be a relative path inside the repository`
+          );
+        } else {
+          const normalizedPath = path.normalize(scope.path.trim());
+
+          if (normalizedPath === '.') {
+            issues.push(`scopes[${index}].path cannot duplicate the root scope`);
+          } else if (normalizedPaths.has(normalizedPath)) {
+            issues.push(`scopes[${index}].path duplicates another scope`);
+          }
+
+          normalizedPaths.add(normalizedPath);
         }
 
         if (isBlankString(scope.installCommand)) {
@@ -129,6 +240,49 @@ function findShapeIssues(config) {
 
         if (!Array.isArray(scope.cleanCommands)) {
           issues.push(`scopes[${index}].cleanCommands must be an array`);
+        }
+
+        if ('beforeScripts' in scope && !Array.isArray(scope.beforeScripts)) {
+          issues.push(`scopes[${index}].beforeScripts must be an array`);
+        }
+
+        if ('afterScripts' in scope && !Array.isArray(scope.afterScripts)) {
+          issues.push(`scopes[${index}].afterScripts must be an array`);
+        }
+
+        if ('auditCommand' in scope && typeof scope.auditCommand !== 'string') {
+          issues.push(`scopes[${index}].auditCommand must be a string`);
+        }
+
+        if (
+          'blockOnNewVulnerabilities' in scope &&
+          typeof scope.blockOnNewVulnerabilities !== 'boolean'
+        ) {
+          issues.push(
+            `scopes[${index}].blockOnNewVulnerabilities must be true or false`
+          );
+        }
+
+        if (
+          'allowMajorUpdates' in scope &&
+          typeof scope.allowMajorUpdates !== 'boolean'
+        ) {
+          issues.push(`scopes[${index}].allowMajorUpdates must be true or false`);
+        }
+
+        validateBundleAnalysis(
+          scope.bundleAnalysis,
+          `scopes[${index}].bundleAnalysis`,
+          issues
+        );
+
+        if (
+          'pythonZeroMajor' in scope &&
+          !['minor', 'patch', 'skip'].includes(scope.pythonZeroMajor)
+        ) {
+          issues.push(
+            `scopes[${index}].pythonZeroMajor must be one of "minor", "patch", or "skip"`
+          );
         }
       });
     }
@@ -155,6 +309,15 @@ export function normalizeConfig(config) {
     cleanCommands: normalizeArray(config.cleanCommands),
     beforeScripts: normalizeArray(config.beforeScripts),
     afterScripts: normalizeArray(config.afterScripts),
+    auditCommand:
+      typeof config.auditCommand === 'string' ? config.auditCommand.trim() : '',
+    blockOnNewVulnerabilities:
+      typeof config.blockOnNewVulnerabilities === 'boolean'
+        ? config.blockOnNewVulnerabilities
+        : true,
+    allowMajorUpdates:
+      typeof config.allowMajorUpdates === 'boolean' ? config.allowMajorUpdates : false,
+    bundleAnalysis: normalizeBundleAnalysis(config.bundleAnalysis),
     scopes,
     branchPrefix:
       typeof config.branchPrefix === 'string' && config.branchPrefix.trim()

@@ -2,6 +2,8 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
+import { redactActivityPayload, redactSensitiveText } from './redaction.js';
+
 const LOG_DIR = path.join(os.homedir(), '.bridge', 'logs');
 const LOG_FILE = path.join(LOG_DIR, 'operations.log');
 
@@ -11,17 +13,17 @@ function safeError(error) {
   }
 
   if (typeof error === 'string') {
-    return error;
+    return redactSensitiveText(error);
   }
 
-  return error.message || String(error);
+  return redactSensitiveText(error.message || String(error));
 }
 
 export async function logActivity(event, payload = {}) {
   const entry = {
     at: new Date().toISOString(),
     event,
-    ...payload
+    ...redactActivityPayload(payload)
   };
 
   try {

@@ -15,6 +15,16 @@ import {
   logRunStart,
   makeRunContext
 } from '../core/activityLogger.js';
+import {
+  captureAuditSnapshot,
+  compareAuditSnapshots,
+  formatAuditCounts
+} from '../core/audit.js';
+import {
+  compareBundleAnalyses,
+  formatBytes,
+  runBundleAnalysis
+} from '../core/bundleAnalysis.js';
 import { CommandExecutionError, runCommand } from '../core/executor.js';
 import {
   assertSafeWorkingBranch,
@@ -25,14 +35,23 @@ import {
   isPathTracked,
   prepareCleanBase,
   pushBridgeBranch,
+  setOriginUrl,
   stageAll
 } from '../core/git.js';
 import {
+  classifyBump,
   computeDepDeltas,
   createDepDeltaSummary,
   mergeDepDeltaSummaries,
   parseDirectDeps
 } from '../core/lockfileDiff.js';
+import {
+  addNpmInstallLinksFlag,
+  parseLocalPackageArguments,
+  prepareNpmLocalPackages,
+  restoreNpmLocalPackages
+} from '../core/localPackages.js';
+import { resolvePathInside, resolveRealPathInside } from '../core/pathSafety.js';
 import {
   formatPythonRequirementsSummary,
   runPythonRequirementsWildcardUpdate
@@ -41,6 +60,13 @@ import { printBanner } from '../ui/banner.js';
 import { command, error, info, line, success, warn } from '../ui/logger.js';
 import { createSpinner } from '../ui/spinner.js';
 import { printSummary } from '../ui/summary.js';
+
+class PatchPolicyError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'PatchPolicyError';
+  }
+}
 
 function getDateStamp(date = new Date()) {
   const year = date.getFullYear();
@@ -132,6 +158,10 @@ function buildPatchScopes(config) {
     cleanCommands: Array.isArray(config.cleanCommands) ? config.cleanCommands : [],
     beforeScripts: Array.isArray(config.beforeScripts) ? config.beforeScripts : [],
     afterScripts: Array.isArray(config.afterScripts) ? config.afterScripts : [],
+    auditCommand: config.auditCommand || '',
+    blockOnNewVulnerabilities: config.blockOnNewVulnerabilities !== false,
+    allowMajorUpdates: config.allowMajorUpdates === true,
+    bundleAnalysis: config.bundleAnalysis || null,
     pythonZeroMajor: config.pythonZeroMajor || 'skip'
   };
 
@@ -139,16 +169,53 @@ function buildPatchScopes(config) {
     ? config.scopes.map((scope) => ({
         ...scope,
         path: normalizeScopePath(scope.path),
-        pythonZeroMajor: scope.pythonZeroMajor || config.pythonZeroMajor || 'minor'
+        auditCommand: scope.auditCommand || '',
+        blockOnNewVulnerabilities:
+          typeof scope.blockOnNewVulnerabilities === 'boolean'
+            ? scope.blockOnNewVulnerabilities
+            : config.blockOnNewVulnerabilities !== false,
+        allowMajorUpdates:
+          typeof scope.allowMajorUpdates === 'boolean'
+            ? scope.allowMajorUpdates
+            : config.allowMajorUpdates === true,
+        bundleAnalysis: scope.bundleAnalysis || null,
+        pythonZeroMajor: scope.pythonZeroMajor || config.pythonZeroMajor || 'skip'
       }))
     : [];
 
   return [rootScope, ...nestedScopes];
 }
 
+export function selectPatchScopes(config, requestedScope = '') {
+  const scopes = buildPatchScopes(config);
+
+  if (!requestedScope) {
+    return scopes;
+  }
+
+  const normalizedRequestedScope = normalizeScopePath(requestedScope);
+  const selected = scopes.find(
+    (scope) => normalizeScopePath(scope.path) === normalizedRequestedScope
+  );
+
+  if (!selected) {
+    const available = scopes.map((scope) => scopeLabel(scope.path)).join(', ');
+    throw new Error(
+      `Unknown scope "${requestedScope}". Configured scopes: ${available}.`
+    );
+  }
+
+  return [selected];
+}
+
 function shouldExcludeFromCopy(sourcePath) {
   const name = path.basename(sourcePath);
-  return name === 'node_modules' || name === '.venv' || name === 'venv';
+  return (
+    name === 'node_modules' ||
+    name === '.venv' ||
+    name === 'venv' ||
+    name === '.bridge-venv'
+  );
 }
 
 async function fileExists(filePath) {
@@ -190,6 +257,21 @@ function formatDeltaSummaryLine(summary) {
 
 function scopeUpdateStrategy(scope, preset) {
   return scope.updateStrategy || preset?.updateStrategy || '';
+}
+
+function resolvePortableOriginUrl(cwd, originUrl) {
+  const value = typeof originUrl === 'string' ? originUrl.trim() : '';
+
+  if (
+    !value ||
+    path.isAbsolute(value) ||
+    /^[a-z][a-z0-9+.-]*:\/\//i.test(value) ||
+    /^[^/\\]+@[^:]+:.+/.test(value)
+  ) {
+    return value;
+  }
+
+  return path.resolve(cwd, value);
 }
 
 async function copyToIsolatedWorkspace(sourceDir, destinationDir) {
@@ -288,25 +370,134 @@ async function runCommandList({
   return results;
 }
 
-async function runOptionalScripts(run, title, scripts, cwd, groupName) {
+async function runValidationScripts(
+  run,
+  title,
+  scripts,
+  cwd,
+  groupName,
+  verbose,
+  collectFailures = false
+) {
   if (!Array.isArray(scripts) || scripts.length === 0) {
-    return;
+    return [];
   }
-  await runCommandList({
+
+  const results = await runCommandList({
     run,
     phase: groupName,
     title,
     commands: scripts,
     cwd,
-    allowFailure: true,
-    quiet: true
+    allowFailure: collectFailures,
+    quiet: !verbose
   });
+
+  return results.filter((result) => !result.success);
 }
 
-async function runScopeWorkflow({ run, tempDir, scope, repoName }) {
+async function runAudit({
+  run,
+  phase,
+  label,
+  repoName,
+  scope,
+  scopeDir,
+  verbose
+}) {
+  const snapshot = await captureAuditSnapshot({
+    cwd: scopeDir,
+    packageManager: scope.packageManager,
+    auditCommand: scope.auditCommand,
+    quiet: !verbose
+  });
+
+  if (!snapshot.supported) {
+    info(`Vulnerability audit (${label}): not configured`);
+    await logPhase(run, phase, 'skipped', {
+      scope: label,
+      repo: repoName,
+      reason: 'not_configured'
+    });
+    return snapshot;
+  }
+
+  if (!snapshot.parsed) {
+    warn(`Vulnerability audit (${label}): ${snapshot.error}`);
+    await logPhase(run, phase, 'warning', {
+      scope: label,
+      repo: repoName,
+      error: snapshot.error,
+      exitCode: snapshot.exitCode
+    });
+    return snapshot;
+  }
+
+  info(`Vulnerability audit (${label}): ${formatAuditCounts(snapshot)}`);
+  await logPhase(run, phase, 'success', {
+    scope: label,
+    repo: repoName,
+    exitCode: snapshot.exitCode,
+    counts: snapshot.counts
+  });
+  return snapshot;
+}
+
+async function runVisualizer({
+  run,
+  stage,
+  label,
+  repoName,
+  scope,
+  scopeDir,
+  verbose
+}) {
+  if (!scope.bundleAnalysis) {
+    return {
+      supported: false,
+      stage,
+      analysis: null,
+      artifactPath: ''
+    };
+  }
+
+  info(`Bundle visualizer (${label}, ${stage}): running build`);
+  const result = await runBundleAnalysis({
+    cwd: scopeDir,
+    config: scope.bundleAnalysis,
+    runId: run.runId,
+    scopeLabel: label,
+    stage,
+    quiet: !verbose
+  });
+  const metric = scope.bundleAnalysis.metric || 'brotli';
+  const total = result.analysis?.totals?.[metric] || 0;
+
+  success(
+    `Bundle visualizer (${label}, ${stage}): ${formatBytes(total)} ${metric}, ${result.analysis.modules} modules`
+  );
+  info(`Visualizer artifact: ${result.artifactPath}`);
+  await logPhase(run, `bundle_${stage}:${label}`, 'success', {
+    repo: repoName,
+    scope: label,
+    metric,
+    totals: result.analysis.totals,
+    modules: result.analysis.modules,
+    artifactPath: result.artifactPath
+  });
+  return result;
+}
+
+async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false }) {
   const relativePath = normalizeScopePath(scope.path);
   const label = scopeLabel(relativePath);
-  const scopeDir = relativePath === '.' ? tempDir : path.join(tempDir, relativePath);
+  const lexicalScopeDir = resolvePathInside(tempDir, relativePath);
+
+  if (!(await fileExists(lexicalScopeDir))) {
+    throw new Error(`Scope path does not exist: ${relativePath}`);
+  }
+
+  const scopeDir = await resolveRealPathInside(tempDir, relativePath);
   const scopePreset = resolveScopePreset(scope);
   const updateStrategy = scopeUpdateStrategy(scope, scopePreset);
   const lockfile = scope.lockfile || scopePreset?.lockfile || null;
@@ -318,10 +509,7 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName }) {
   let shouldCollectMetrics = hasMetricTarget;
   let beforeLockfileContent = null;
   let metricsSummary = createDepDeltaSummary();
-
-  if (!(await fileExists(scopeDir))) {
-    throw new Error(`Scope path does not exist: ${relativePath}`);
-  }
+  let localPackageSnapshot = null;
 
   line();
   info(`Scope: ${label}`);
@@ -334,6 +522,52 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName }) {
     );
   }
 
+  const beforeAudit = await runAudit({
+    run,
+    phase: `audit_before:${label}`,
+    label,
+    repoName,
+    scope,
+    scopeDir,
+    verbose
+  });
+
+  if (hasMetricTarget) {
+    try {
+      beforeLockfileContent = await readTextFileIfExists(lockfilePath);
+    } catch (beforeMetricsError) {
+      shouldCollectMetrics = false;
+      await logPhase(run, `metrics:${label}`, 'warning', {
+        scope: label,
+        lockfile,
+        message: `Failed to read original lockfile; skipping dep delta metrics: ${beforeMetricsError.message}`
+      });
+    }
+  }
+
+  if (scope.localPackages?.length > 0) {
+    if (scope.packageManager !== 'npm') {
+      throw new Error('Local package substitution currently supports npm scopes only.');
+    }
+
+    info(
+      `Local packages (${label}): ${scope.localPackages.map((entry) => entry.name).join(', ')}`
+    );
+    localPackageSnapshot = await prepareNpmLocalPackages({
+      cwd: scopeDir,
+      localPackages: scope.localPackages,
+      quiet: !verbose
+    });
+    await logPhase(run, `local_packages:${label}`, 'prepared', {
+      repo: repoName,
+      scope: label,
+      packages: localPackageSnapshot.localPackages.map((entry) => ({
+        name: entry.name,
+        version: entry.version
+      }))
+    });
+  }
+
   await runCommandList({
     run,
     phase: `clean:${label}`,
@@ -341,7 +575,7 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName }) {
     commands: scope.cleanCommands,
     cwd: scopeDir,
     allowFailure: false,
-    quiet: true
+    quiet: !verbose
   });
 
   const installResult = await runPhase({
@@ -352,24 +586,31 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName }) {
     task: async () =>
       runCommand(scope.installCommand, {
         cwd: scopeDir,
-        quiet: true
+        quiet: !verbose
       }),
     meta: { command: scope.installCommand, scope: label }
   });
-  line(normalizeCommandOutput(installResult.stdout, 220) || 'Install output: (no stdout)');
-
-  if (hasMetricTarget) {
-    try {
-      beforeLockfileContent = await readTextFileIfExists(lockfilePath);
-    } catch (beforeMetricsError) {
-      shouldCollectMetrics = false;
-      await logPhase(run, `metrics:${label}`, 'warning', {
-        scope: label,
-        lockfile,
-        message: `Failed to read lockfile before update; skipping dep delta metrics: ${beforeMetricsError.message}`
-      });
-    }
+  if (!verbose) {
+    line(normalizeCommandOutput(installResult.stdout, 220) || 'Install output: (no stdout)');
   }
+
+  await runValidationScripts(
+    run,
+    `Running before-update validation (${label})...`,
+    scope.beforeScripts,
+    scopeDir,
+    `beforeScripts:${label}`,
+    verbose
+  );
+  const beforeBundle = await runVisualizer({
+    run,
+    stage: 'before',
+    label,
+    repoName,
+    scope,
+    scopeDir,
+    verbose
+  });
 
   const updateResult = await runPhase({
     run,
@@ -387,7 +628,7 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName }) {
 
       return runCommand(scope.updateCommand, {
         cwd: scopeDir,
-        quiet: true
+        quiet: !verbose
       });
     },
     meta: { command: scope.updateCommand, scope: label }
@@ -397,8 +638,46 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName }) {
       formatPythonRequirementsSummary(updateResult.pythonRequirementsSummary),
       'Python requirements'
     );
+
+    const pythonSummary = createDepDeltaSummary();
+
+    for (const change of updateResult.pythonRequirementsSummary.changes || []) {
+      const bump = classifyBump(change.from, change.to);
+
+      if (!scope.allowMajorUpdates && bump === 'major') {
+        throw new PatchPolicyError(
+          `Direct major update is blocked in ${label}: ${change.name} ${change.from} -> ${change.to}.`
+        );
+      }
+
+      pythonSummary.totalChanged += 1;
+      pythonSummary.directChanged += 1;
+
+      if (Object.prototype.hasOwnProperty.call(pythonSummary.byBump, bump)) {
+        pythonSummary.byBump[bump] += 1;
+      } else {
+        pythonSummary.byBump.other += 1;
+      }
+
+      await logDepDelta(run, {
+        repo: repoName,
+        manager: scope.packageManager,
+        scope: label,
+        name: change.name,
+        from: change.from,
+        to: change.to,
+        bump,
+        kind: 'direct',
+        blastRadius: null,
+        causedBy: null
+      });
+    }
+
+    metricsSummary = mergeDepDeltaSummaries(metricsSummary, pythonSummary);
   } else {
-    line(normalizeCommandOutput(updateResult.stdout, 220) || 'Update output: (no stdout)');
+    if (!verbose) {
+      line(normalizeCommandOutput(updateResult.stdout, 220) || 'Update output: (no stdout)');
+    }
   }
 
   await runPhase({
@@ -414,13 +693,26 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName }) {
         commands: scope.cleanCommands,
         cwd: scopeDir,
         allowFailure: false,
-        quiet: true
+        quiet: !verbose
       });
 
-      return runCommand(scope.installCommand, { cwd: scopeDir, quiet: true });
+      return runCommand(scope.installCommand, { cwd: scopeDir, quiet: !verbose });
     },
     meta: { command: scope.installCommand, scope: label }
   });
+
+  if (localPackageSnapshot) {
+    await restoreNpmLocalPackages(localPackageSnapshot, {
+      cwd: scopeDir,
+      quiet: !verbose
+    });
+    success(`Restored registry dependency declarations (${label})`);
+    await logPhase(run, `local_packages:${label}`, 'restored', {
+      repo: repoName,
+      scope: label,
+      packageCount: localPackageSnapshot.localPackages.length
+    });
+  }
 
   if (shouldCollectMetrics) {
     if (beforeLockfileContent === null) {
@@ -462,6 +754,19 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName }) {
             lockfileFormat,
             directDeps
           });
+          const directMajorUpdates = deltas.filter(
+            (delta) => delta.kind === 'direct' && delta.bump === 'major'
+          );
+
+          if (!scope.allowMajorUpdates && directMajorUpdates.length > 0) {
+            const examples = directMajorUpdates
+              .slice(0, 5)
+              .map((delta) => `${delta.name} ${delta.from} -> ${delta.to}`)
+              .join(', ');
+            throw new PatchPolicyError(
+              `Direct major updates are blocked in ${label}: ${examples}. Set "allowMajorUpdates": true only after explicit review.`
+            );
+          }
 
           metricsSummary = mergeDepDeltaSummaries(metricsSummary, summary);
 
@@ -475,6 +780,7 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName }) {
               to: delta.to,
               bump: delta.bump,
               kind: delta.kind,
+              dependencyPath: delta.dependencyPath,
               // TODO(v2): causal attribution requires the resolved dependency graph.
               blastRadius: null,
               causedBy: null
@@ -492,6 +798,10 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName }) {
           });
         }
       } catch (metricsError) {
+        if (metricsError instanceof PatchPolicyError) {
+          throw metricsError;
+        }
+
         await logPhase(run, `metrics:${label}`, 'warning', {
           scope: label,
           lockfile,
@@ -501,22 +811,102 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName }) {
     }
   }
 
-  await runOptionalScripts(
+  const policyViolations = [];
+  const afterAudit = await runAudit({
     run,
-    `Running before scripts (${label})...`,
-    scope.beforeScripts,
+    phase: `audit_after:${label}`,
+    label,
+    repoName,
+    scope,
     scopeDir,
-    `beforeScripts:${label}`
-  );
-  await runOptionalScripts(
+    verbose
+  });
+  const auditComparison = compareAuditSnapshots(beforeAudit, afterAudit);
+
+  if (auditComparison.comparable) {
+    const deltaPrefix = auditComparison.delta.total > 0 ? '+' : '';
+    info(
+      `Vulnerability delta (${label}): ${deltaPrefix}${auditComparison.delta.total} total`
+    );
+
+    if (scope.blockOnNewVulnerabilities && auditComparison.regressed) {
+      policyViolations.push(
+        `Security regression in ${label}: vulnerability count increased from ${beforeAudit.counts.total} to ${afterAudit.counts.total}.`
+      );
+    }
+  }
+
+  const afterBundle = await runVisualizer({
     run,
-    `Running after scripts (${label})...`,
+    stage: 'after',
+    label,
+    repoName,
+    scope,
+    scopeDir,
+    verbose
+  });
+  const bundleComparison =
+    beforeBundle.supported && afterBundle.supported
+      ? compareBundleAnalyses(
+          beforeBundle.analysis,
+          afterBundle.analysis,
+          scope.bundleAnalysis
+        )
+      : null;
+
+  if (bundleComparison) {
+    const sign = bundleComparison.deltaBytes > 0 ? '+' : '';
+    info(
+      `Bundle delta (${label}, ${bundleComparison.metric}): ${sign}${formatBytes(bundleComparison.deltaBytes)} (${sign}${bundleComparison.deltaPercent.toFixed(2)}%)`
+    );
+    await logPhase(run, `bundle_comparison:${label}`, 'success', {
+      repo: repoName,
+      scope: label,
+      ...bundleComparison
+    });
+
+    if (bundleComparison.thresholdExceeded) {
+      policyViolations.push(
+        `Bundle size regression in ${label}: ${bundleComparison.metric} increased by ${formatBytes(bundleComparison.deltaBytes)} (${bundleComparison.deltaPercent.toFixed(2)}%), exceeding the configured threshold.`
+      );
+    }
+  }
+
+  const afterValidationFailures = await runValidationScripts(
+    run,
+    `Running after-update validation (${label})...`,
     scope.afterScripts,
     scopeDir,
-    `afterScripts:${label}`
+    `afterScripts:${label}`,
+    verbose,
+    true
   );
 
-  return metricsSummary;
+  for (const validationFailure of afterValidationFailures) {
+    policyViolations.push(
+      `After-update validation failed in ${label}: ${validationFailure.command}.`
+    );
+  }
+
+  if (policyViolations.length > 0) {
+    throw new PatchPolicyError(policyViolations.join(' '));
+  }
+
+  return {
+    metricsSummary,
+    audit: {
+      label,
+      before: beforeAudit,
+      after: afterAudit,
+      comparison: auditComparison
+    },
+    bundle: {
+      label,
+      before: beforeBundle,
+      after: afterBundle,
+      comparison: bundleComparison
+    }
+  };
 }
 
 async function writeConfigFile(configPath, config) {
@@ -546,10 +936,47 @@ async function ensureBridgeConfigIncluded(tempDir, configFileName, config) {
   return true;
 }
 
-export async function patchCommand({ cwd = process.cwd() } = {}) {
+async function findAuthenticationRecoveryCommand(tempDir, patchError) {
+  const output = `${patchError?.stdout || ''}\n${patchError?.stderr || ''}`;
+
+  if (!/\b(E401|E403)\b|reauthentication|authentication token/i.test(output)) {
+    return '';
+  }
+
+  const packageJsonText = await readTextFileIfExists(path.join(tempDir, 'package.json'));
+
+  if (!packageJsonText) {
+    return '';
+  }
+
+  try {
+    const packageJson = JSON.parse(packageJsonText);
+    const scripts = packageJson?.scripts || {};
+    const scriptName = Object.keys(scripts).find((name) =>
+      /(^|:)(auth|login)$|auth|login/i.test(name)
+    );
+    return scriptName ? `npm run ${scriptName}` : '';
+  } catch {
+    return '';
+  }
+}
+
+export async function patchCommand({
+  cwd = process.cwd(),
+  dryRun = false,
+  keepWorkspace = false,
+  verbose = false,
+  scope: requestedScope = '',
+  localPackages: localPackageArguments = []
+} = {}) {
   let config;
   let configPath = '';
   const run = makeRunContext('patch', cwd);
+
+  if (keepWorkspace && !dryRun) {
+    error('--keep-workspace is only available with --dry-run.');
+    return false;
+  }
 
   try {
     ({ config, configPath } = await loadConfig(cwd));
@@ -562,12 +989,19 @@ export async function patchCommand({ cwd = process.cwd() } = {}) {
 
   await logRunStart(run, {
     packageManager: config.packageManager,
-    hasRepoUrl: Boolean(config.repoUrl)
+    hasRepoUrl: Boolean(config.repoUrl),
+    dryRun,
+    keepWorkspace,
+    verbose,
+    requestedScope
   });
 
   printBanner();
   info(`Config: ${configPath}`);
   info(`Package manager: ${config.packageManager}`);
+  info(`Mode: ${dryRun ? 'dry run (no commit or push)' : 'commit and push'}`);
+  info(`Scope: ${requestedScope ? scopeLabel(normalizeScopePath(requestedScope)) : 'all'}`);
+  info(`Command output: ${verbose ? 'streaming' : 'condensed'}`);
   info(`Log file: ${getActivityLogPath()}`);
   line();
 
@@ -578,6 +1012,19 @@ export async function patchCommand({ cwd = process.cwd() } = {}) {
   const dateStamp = getDateStamp();
   const configFileName = path.basename(configPath);
   let depDeltaSummary = createDepDeltaSummary();
+  const auditResults = [];
+  const bundleResults = [];
+  const portableOriginUrl = resolvePortableOriginUrl(cwd, await getOriginUrl(cwd));
+  let runtimeLocalPackages = [];
+
+  try {
+    runtimeLocalPackages = parseLocalPackageArguments(localPackageArguments, cwd);
+  } catch (localPackageError) {
+    error(localPackageError.message);
+    await logRunFailure(run, localPackageError);
+    await logRunEnd(run, 'failed_preflight');
+    return false;
+  }
 
   let branchName = '';
   let compareUrl = '';
@@ -594,6 +1041,10 @@ export async function patchCommand({ cwd = process.cwd() } = {}) {
       meta: { tempDir },
       task: async () => {
         await copyToIsolatedWorkspace(cwd, tempDir);
+
+        if (portableOriginUrl) {
+          await setOriginUrl(tempDir, portableOriginUrl);
+        }
       }
     });
     info(`Isolated workspace: ${tempDir}`);
@@ -663,17 +1114,37 @@ export async function patchCommand({ cwd = process.cwd() } = {}) {
       deletedBranches: cleanBaseResult.deletedBranches
     });
 
-    const scopes = buildPatchScopes(config);
+    const scopes = selectPatchScopes(config, requestedScope);
+
+    if (runtimeLocalPackages.length > 0) {
+      const rootScope = scopes.find((scope) => normalizeScopePath(scope.path) === '.');
+
+      if (!rootScope) {
+        throw new Error(
+          '--local-package requires the root npm scope to be selected.'
+        );
+      }
+
+      rootScope.localPackages = runtimeLocalPackages;
+      rootScope.installCommand = addNpmInstallLinksFlag(rootScope.installCommand);
+      rootScope.updateCommand = addNpmInstallLinksFlag(rootScope.updateCommand);
+    }
     info(`Update scopes: ${scopes.length}`);
 
     for (const scope of scopes) {
-      const scopeSummary = await runScopeWorkflow({
+      const scopeResult = await runScopeWorkflow({
         run,
         tempDir,
         scope,
-        repoName
+        repoName,
+        verbose
       });
-      depDeltaSummary = mergeDepDeltaSummaries(depDeltaSummary, scopeSummary);
+      depDeltaSummary = mergeDepDeltaSummaries(
+        depDeltaSummary,
+        scopeResult.metricsSummary
+      );
+      auditResults.push(scopeResult.audit);
+      bundleResults.push(scopeResult.bundle);
     }
 
     await logDepDeltaSummary(run, {
@@ -723,6 +1194,30 @@ export async function patchCommand({ cwd = process.cwd() } = {}) {
       line(`  - ${stagedFile}`);
     }
 
+    const diffStatResult = await runCommand('git diff --staged --stat', {
+      cwd: tempDir,
+      quiet: true
+    });
+    const diffStat = diffStatResult.stdout.trim();
+
+    if (diffStat) {
+      line();
+      info('Change summary:');
+      line(diffStat);
+    }
+
+    if (dryRun) {
+      success('Dry run complete. No commit was created and nothing was pushed.');
+      status = 'dry_run';
+      await logRunEnd(run, 'dry_run', {
+        branchName,
+        baseBranch,
+        changedFilesCount,
+        keptWorkspace: keepWorkspace
+      });
+      return true;
+    }
+
     await runPhase({
       run,
       phase: 'push',
@@ -767,6 +1262,19 @@ export async function patchCommand({ cwd = process.cwd() } = {}) {
       if (patchError.stderr.trim()) {
         line(patchError.stderr.trim());
       }
+
+      if (patchError.stdout.trim()) {
+        line(patchError.stdout.trim());
+      }
+
+      const recoveryCommand = await findAuthenticationRecoveryCommand(
+        tempDir,
+        patchError
+      );
+
+      if (recoveryCommand) {
+        warn(`Registry authentication needs attention. Run \`${recoveryCommand}\` in the source repository, then retry Bridge.`);
+      }
     } else {
       error(patchError.message);
     }
@@ -775,11 +1283,15 @@ export async function patchCommand({ cwd = process.cwd() } = {}) {
     await logRunEnd(run, 'failed', { branchName });
     return false;
   } finally {
-    try {
-      await fs.rm(tempDir, { recursive: true, force: true });
-      info(`Cleaned isolated workspace: ${tempDir}`);
-    } catch (cleanupError) {
-      warn(`Failed to delete temp directory: ${cleanupError.message}`);
+    if (keepWorkspace) {
+      warn(`Kept isolated workspace for debugging: ${tempDir}`);
+    } else {
+      try {
+        await fs.rm(tempDir, { recursive: true, force: true });
+        info(`Cleaned isolated workspace: ${tempDir}`);
+      } catch (cleanupError) {
+        warn(`Failed to delete temp directory: ${cleanupError.message}`);
+      }
     }
 
     if (status === 'pushed') {
@@ -794,7 +1306,54 @@ export async function patchCommand({ cwd = process.cwd() } = {}) {
       }
     }
 
+    if (status === 'dry_run') {
+      const auditLines = auditResults
+        .filter((entry) => entry?.before?.supported)
+        .map(
+          (entry) =>
+            `Audit ${entry.label}: ${formatAuditCounts(entry.before)} -> ${formatAuditCounts(entry.after)}`
+        );
+      const bundleLines = bundleResults
+        .filter((entry) => entry?.comparison)
+        .map((entry) => {
+          const comparison = entry.comparison;
+          const sign = comparison.deltaBytes > 0 ? '+' : '';
+          return `Bundle ${entry.label}: ${sign}${formatBytes(comparison.deltaBytes)} (${sign}${comparison.deltaPercent.toFixed(2)}% ${comparison.metric})`;
+        });
+
+      printSummary(
+        [
+          'Bridge dry run complete.',
+          baseBranch ? `Base: ${baseBranch}` : 'Base: (local snapshot)',
+          `Candidate branch: ${branchName}`,
+          formatDeltaSummaryLine(depDeltaSummary),
+          `Files changed: ${changedFilesCount}`,
+          ...auditLines,
+          ...bundleLines,
+          keepWorkspace
+            ? `Workspace: ${tempDir}`
+            : 'Isolated workspace cleaned.',
+          'No commit was created and nothing was pushed.'
+        ],
+        'Bridge dry run'
+      );
+    }
+
     if (status === 'pushed') {
+      const auditLines = auditResults
+        .filter((entry) => entry?.before?.supported)
+        .map(
+          (entry) =>
+            `Audit ${entry.label}: ${formatAuditCounts(entry.before)} -> ${formatAuditCounts(entry.after)}`
+        );
+      const bundleLines = bundleResults
+        .filter((entry) => entry?.comparison)
+        .map((entry) => {
+          const comparison = entry.comparison;
+          const sign = comparison.deltaBytes > 0 ? '+' : '';
+          return `Bundle ${entry.label}: ${sign}${formatBytes(comparison.deltaBytes)} (${sign}${comparison.deltaPercent.toFixed(2)}% ${comparison.metric})`;
+        });
+
       printSummary(
         [
           'Bridge complete.',
@@ -802,6 +1361,8 @@ export async function patchCommand({ cwd = process.cwd() } = {}) {
           `Branch: ${branchName}`,
           formatDeltaSummaryLine(depDeltaSummary),
           `Files changed: ${changedFilesCount}`,
+          ...auditLines,
+          ...bundleLines,
           compareUrl ? `Compare: ${compareUrl}` : 'Compare URL unavailable.',
           'Review your changes and merge when ready.'
         ],
