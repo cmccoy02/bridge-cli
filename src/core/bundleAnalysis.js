@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 
+import { getBridgeHome } from './activityLogger.js';
 import { runCommand } from './executor.js';
 import { resolvePathInside } from './pathSafety.js';
 
@@ -138,8 +138,7 @@ export async function runBundleAnalysis({
     const content = await fs.readFile(reportPath, 'utf8');
     const analysis = parseVisualizerHtml(content);
     const artifactDir = path.join(
-      os.homedir(),
-      '.bridge',
+      getBridgeHome(),
       'artifacts',
       safeArtifactSegment(runId),
       safeArtifactSegment(scopeLabel)

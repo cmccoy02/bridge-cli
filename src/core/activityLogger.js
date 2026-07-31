@@ -4,8 +4,18 @@ import path from 'node:path';
 
 import { redactActivityPayload, redactSensitiveText } from './redaction.js';
 
-const LOG_DIR = path.join(os.homedir(), '.bridge', 'logs');
-const LOG_FILE = path.join(LOG_DIR, 'operations.log');
+export function getBridgeHome() {
+  const configured = String(process.env.BRIDGE_HOME || '').trim();
+  return configured ? path.resolve(configured) : path.join(os.homedir(), '.bridge');
+}
+
+function getLogDir() {
+  return path.join(getBridgeHome(), 'logs');
+}
+
+function getLogFile() {
+  return path.join(getLogDir(), 'operations.log');
+}
 
 function safeError(error) {
   if (!error) {
@@ -27,15 +37,15 @@ export async function logActivity(event, payload = {}) {
   };
 
   try {
-    await fs.mkdir(LOG_DIR, { recursive: true });
-    await fs.appendFile(LOG_FILE, `${JSON.stringify(entry)}\n`, 'utf8');
+    await fs.mkdir(getLogDir(), { recursive: true });
+    await fs.appendFile(getLogFile(), `${JSON.stringify(entry)}\n`, 'utf8');
   } catch {
     // Logging should never block a patch/init/validate run.
   }
 }
 
 export function getActivityLogPath() {
-  return LOG_FILE;
+  return getLogFile();
 }
 
 export function makeRunContext(command, cwd) {

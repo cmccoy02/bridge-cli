@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 
 import { getActivityLogPath } from '../core/activityLogger.js';
+import { findSavedRunReport } from '../core/runReport.js';
 import { info, line, section, warn } from '../ui/logger.js';
 import { printSummary } from '../ui/summary.js';
 
@@ -332,11 +333,90 @@ function printHumanReport(report, { repoFilter = '', limit = 10 } = {}) {
   }
 }
 
+function formatRunStatus(status) {
+  if (!status) {
+    return 'unknown';
+  }
+
+  return String(status).replace(/_/g, ' ');
+}
+
+function formatRunSummary(report, reportPath) {
+  const dependency = report.outcome?.dependencySummary;
+  const failure = report.outcome?.failure;
+  const artifacts = Array.isArray(report.artifacts) ? report.artifacts : [];
+  const auditLines = (report.outcome?.audits || []).map((audit) => {
+    const before = audit.before?.total;
+    const after = audit.after?.total;
+    return `Audit ${audit.scope}: ${before ?? 'n/a'} -> ${after ?? 'n/a'}`;
+  });
+  const bundleLines = (report.outcome?.bundles || [])
+    .filter((bundle) => bundle.comparison)
+    .map((bundle) => {
+      const comparison = bundle.comparison;
+      const sign = comparison.deltaBytes > 0 ? '+' : '';
+      return `Bundle ${bundle.scope}: ${sign}${comparison.deltaBytes} bytes (${sign}${comparison.deltaPercent.toFixed(2)}% ${comparison.metric})`;
+    });
+
+  printSummary(
+    [
+      `Run: ${report.run?.id || 'unknown'}`,
+      `Status: ${formatRunStatus(report.run?.status)}`,
+      `Repository: ${report.target?.repository || 'unknown'}`,
+      `Mode: ${report.execution?.dryRun ? 'dry run' : 'apply'}`,
+      `Duration: ${report.run?.durationMs ?? 0}ms`,
+      report.target?.baseBranch ? `Base: ${report.target.baseBranch}` : '',
+      report.target?.candidateBranch ? `Candidate: ${report.target.candidateBranch}` : '',
+      dependency
+        ? `Dependencies: ${dependency.directChanged} direct, ${dependency.transitiveChanged} transitive`
+        : 'Dependencies: not reached',
+      `Files changed: ${report.outcome?.changedFilesCount ?? 0}`,
+      ...auditLines,
+      ...bundleLines,
+      failure ? `Failure: ${failure.message}` : '',
+      `Report: ${reportPath}`,
+      artifacts.length > 0 ? `Artifacts: ${artifacts.length}` : ''
+    ].filter(Boolean),
+    'Bridge latest run'
+  );
+
+  if (failure?.command) {
+    line(`Failed command: ${failure.command}`);
+  }
+
+  for (const artifact of artifacts) {
+    line(`- ${artifact}`);
+  }
+}
+
 export async function reportCommand({
   json = false,
+  latest = false,
   repo = '',
   limit = 10
 } = {}) {
+  if (latest !== false) {
+    const selectedRun = typeof latest === 'string' ? latest : '';
+    const saved = await findSavedRunReport(selectedRun);
+
+    if (!saved) {
+      warn(
+        selectedRun
+          ? `No saved Bridge report found for run ${selectedRun}.`
+          : 'No saved detailed Bridge run reports found yet.'
+      );
+      return false;
+    }
+
+    if (json) {
+      line(JSON.stringify(saved.report, null, 2));
+    } else {
+      formatRunSummary(saved.report, saved.reportPath);
+    }
+
+    return true;
+  }
+
   const logPath = getActivityLogPath();
   const entries = await readActivityEntries(logPath);
   const repoFilter = normalizeRepoFilter(repo);

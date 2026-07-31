@@ -51,6 +51,7 @@ import {
   prepareNpmLocalPackages,
   restoreNpmLocalPackages
 } from '../core/localPackages.js';
+import { writeFailureEvidence, writeRunReport } from '../core/runReport.js';
 import { resolvePathInside, resolveRealPathInside } from '../core/pathSafety.js';
 import {
   formatPythonRequirementsSummary,
@@ -62,9 +63,16 @@ import { createSpinner } from '../ui/spinner.js';
 import { printSummary } from '../ui/summary.js';
 
 class PatchPolicyError extends Error {
-  constructor(message) {
+  constructor(message, commandResult = null) {
     super(message);
     this.name = 'PatchPolicyError';
+
+    if (commandResult) {
+      this.command = commandResult.command;
+      this.code = commandResult.code;
+      this.stdout = commandResult.stdout;
+      this.stderr = commandResult.stderr;
+    }
   }
 }
 
@@ -362,9 +370,18 @@ async function runCommandList({
     }
   }
 
-  await logPhase(run, phase, 'success', {
+  const failedCommands = results
+    .filter((result) => !result.success)
+    .map((result) => ({
+      command: result.command,
+      exitCode: result.code,
+      output: normalizeCommandOutput(result.stderr || result.stdout)
+    }));
+
+  await logPhase(run, phase, failedCommands.length > 0 ? 'warning' : 'success', {
     commandCount: commands.length,
-    allowFailure
+    allowFailure,
+    ...(failedCommands.length > 0 ? { failedCommands } : {})
   });
 
   return results;
@@ -889,7 +906,7 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
   }
 
   if (policyViolations.length > 0) {
-    throw new PatchPolicyError(policyViolations.join(' '));
+    throw new PatchPolicyError(policyViolations.join(' '), afterValidationFailures[0]);
   }
 
   return {
@@ -1031,6 +1048,9 @@ export async function patchCommand({
   let status = 'failed';
   let changedFilesCount = 0;
   let baseBranch = '';
+  let failure = null;
+  let failurePath = '';
+  let runReportPath = '';
 
   try {
     await runPhase({
@@ -1255,6 +1275,7 @@ export async function patchCommand({
     });
     return true;
   } catch (patchError) {
+    failure = patchError;
     if (patchError instanceof CommandExecutionError) {
       error(`Command failed: ${patchError.command}`);
       command(patchError.command);
@@ -1275,6 +1296,17 @@ export async function patchCommand({
       if (recoveryCommand) {
         warn(`Registry authentication needs attention. Run \`${recoveryCommand}\` in the source repository, then retry Bridge.`);
       }
+    } else if (patchError.command) {
+      error(patchError.message);
+      command(patchError.command);
+
+      if (patchError.stderr?.trim()) {
+        line(patchError.stderr.trim());
+      }
+
+      if (patchError.stdout?.trim()) {
+        line(patchError.stdout.trim());
+      }
     } else {
       error(patchError.message);
     }
@@ -1283,6 +1315,38 @@ export async function patchCommand({
     await logRunEnd(run, 'failed', { branchName });
     return false;
   } finally {
+    if (failure) {
+      try {
+        failurePath = await writeFailureEvidence(run.runId, failure);
+      } catch (artifactError) {
+        warn(`Could not save failure evidence: ${artifactError.message}`);
+      }
+    }
+
+    try {
+      const savedReport = await writeRunReport({
+        run,
+        status,
+        repo: repoName,
+        configPath,
+        dryRun,
+        keepWorkspace,
+        requestedScope,
+        branchName,
+        baseBranch,
+        changedFilesCount,
+        dependencySummary: depDeltaSummary,
+        auditResults,
+        bundleResults,
+        localPackages: runtimeLocalPackages,
+        failure,
+        failurePath
+      });
+      runReportPath = savedReport.reportPath;
+    } catch (reportError) {
+      warn(`Could not save detailed Bridge report: ${reportError.message}`);
+    }
+
     if (keepWorkspace) {
       warn(`Kept isolated workspace for debugging: ${tempDir}`);
     } else {
@@ -1333,9 +1397,21 @@ export async function patchCommand({
           keepWorkspace
             ? `Workspace: ${tempDir}`
             : 'Isolated workspace cleaned.',
+          runReportPath ? `Report: ${runReportPath}` : '',
           'No commit was created and nothing was pushed.'
-        ],
+        ].filter(Boolean),
         'Bridge dry run'
+      );
+    } else if (status === 'failed') {
+      printSummary(
+        [
+          'Bridge stopped before creating a branch or PR.',
+          failure?.message ? `Reason: ${failure.message}` : 'Reason: unknown failure',
+          failurePath ? `Failure evidence: ${failurePath}` : '',
+          runReportPath ? `Report: ${runReportPath}` : '',
+          keepWorkspace ? `Workspace: ${tempDir}` : 'Isolated workspace cleaned.'
+        ].filter(Boolean),
+        'Bridge run stopped'
       );
     }
 

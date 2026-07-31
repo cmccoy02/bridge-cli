@@ -34,6 +34,52 @@ async function findGitMetadata(rootDir) {
   return '';
 }
 
+export async function inspectNpmLocalPackage({ cwd, localPackage }) {
+  const manifestPath = path.join(cwd, 'package.json');
+  const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf8'));
+  const realPath = await fs.realpath(localPackage.path);
+  const stat = await fs.stat(realPath);
+
+  if (!stat.isDirectory()) {
+    throw new Error(`Local package path is not a directory: ${localPackage.path}`);
+  }
+
+  const gitMetadataPath = await findGitMetadata(realPath);
+
+  if (gitMetadataPath) {
+    throw new Error(
+      `Local package ${localPackage.name} contains Git metadata at ${gitMetadataPath}. Remove it before linking.`
+    );
+  }
+
+  const localManifest = JSON.parse(
+    await fs.readFile(path.join(realPath, 'package.json'), 'utf8')
+  );
+
+  if (localManifest.name !== localPackage.name) {
+    throw new Error(
+      `Local package name mismatch: expected ${localPackage.name}, found ${localManifest.name || '(missing)'}.`
+    );
+  }
+
+  const dependencyGroup = DEPENDENCY_GROUPS.find((group) =>
+    Object.prototype.hasOwnProperty.call(manifest[group] || {}, localPackage.name)
+  );
+
+  if (!dependencyGroup) {
+    throw new Error(
+      `Local package ${localPackage.name} is not declared in ${path.basename(manifestPath)}.`
+    );
+  }
+
+  return {
+    ...localPackage,
+    realPath,
+    version: localManifest.version || '',
+    dependencyGroup
+  };
+}
+
 function formatJson(value) {
   return `${JSON.stringify(value, null, 2)}\n`;
 }
@@ -151,57 +197,20 @@ export async function prepareNpmLocalPackages({
   const resolvedPackages = [];
 
   for (const localPackage of localPackages) {
-    const realPath = await fs.realpath(localPackage.path);
-    const stat = await fs.stat(realPath);
+    const inspected = await inspectNpmLocalPackage({ cwd, localPackage });
 
-    if (!stat.isDirectory()) {
-      throw new Error(`Local package path is not a directory: ${localPackage.path}`);
-    }
-
-    const gitMetadataPath = await findGitMetadata(realPath);
-
-    if (gitMetadataPath) {
-      throw new Error(
-        `Local package ${localPackage.name} contains Git metadata at ${gitMetadataPath}. Remove it before linking.`
-      );
-    }
-
-    const localManifest = JSON.parse(
-      await fs.readFile(path.join(realPath, 'package.json'), 'utf8')
-    );
-
-    if (localManifest.name !== localPackage.name) {
-      throw new Error(
-        `Local package name mismatch: expected ${localPackage.name}, found ${localManifest.name || '(missing)'}.`
-      );
-    }
-
-    const dependencyGroup = DEPENDENCY_GROUPS.find((group) =>
-      Object.prototype.hasOwnProperty.call(manifest[group] || {}, localPackage.name)
-    );
-
-    if (!dependencyGroup) {
-      throw new Error(
-        `Local package ${localPackage.name} is not declared in ${path.basename(manifestPath)}.`
-      );
-    }
-
-    manifest[dependencyGroup][localPackage.name] = `file:${realPath}`;
+    manifest[inspected.dependencyGroup][localPackage.name] = `file:${inspected.realPath}`;
     lock.packages ||= {};
     lock.packages[''] ||= {};
-    lock.packages[''][dependencyGroup] ||= {};
-    lock.packages[''][dependencyGroup][localPackage.name] = `file:${realPath}`;
+    lock.packages[''][inspected.dependencyGroup] ||= {};
+    lock.packages[''][inspected.dependencyGroup][localPackage.name] = `file:${inspected.realPath}`;
     delete lock.packages[`node_modules/${localPackage.name}`];
 
     if (lock.dependencies) {
       delete lock.dependencies[localPackage.name];
     }
 
-    resolvedPackages.push({
-      ...localPackage,
-      realPath,
-      version: localManifest.version || ''
-    });
+    resolvedPackages.push(inspected);
   }
 
   await fs.writeFile(manifestPath, formatJson(manifest), 'utf8');

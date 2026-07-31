@@ -8,7 +8,11 @@ import {
 } from '../core/activityLogger.js';
 import { commandExists, runCommand } from '../core/executor.js';
 import { getOriginUrl } from '../core/git.js';
-import { error, line, success } from '../ui/logger.js';
+import {
+  inspectNpmLocalPackage,
+  parseLocalPackageArguments
+} from '../core/localPackages.js';
+import { error, info, line, success } from '../ui/logger.js';
 
 function firstToken(commandString) {
   if (typeof commandString !== 'string' || commandString.trim().length === 0) {
@@ -43,12 +47,18 @@ function commandList(value) {
   return value.filter((entry) => typeof entry === 'string' && entry.trim().length > 0);
 }
 
-export async function validateCommand({ cwd = process.cwd(), offline = false } = {}) {
-  const run = makeRunContext('validate', cwd);
-  await logRunStart(run, { offline });
+export async function validateCommand({
+  cwd = process.cwd(),
+  offline = false,
+  localPackages: localPackageArguments = [],
+  commandName = 'validate'
+} = {}) {
+  const run = makeRunContext(commandName, cwd);
+  await logRunStart(run, { offline, localPackageCount: localPackageArguments.length });
 
   let config;
   const issues = [];
+  let resolvedLocalPackages = [];
 
   try {
     ({ config } = await loadConfig(cwd));
@@ -129,6 +139,25 @@ export async function validateCommand({ cwd = process.cwd(), offline = false } =
         }
       }
     }
+
+    try {
+      const requestedLocalPackages = parseLocalPackageArguments(
+        localPackageArguments,
+        cwd
+      );
+
+      if (requestedLocalPackages.length > 0 && config.packageManager !== 'npm') {
+        issues.push('--local-package is currently supported only for root npm projects');
+      } else {
+        for (const localPackage of requestedLocalPackages) {
+          resolvedLocalPackages.push(
+            await inspectNpmLocalPackage({ cwd, localPackage })
+          );
+        }
+      }
+    } catch (localPackageError) {
+      issues.push(localPackageError.message);
+    }
   }
 
   if (issues.length > 0) {
@@ -148,6 +177,12 @@ export async function validateCommand({ cwd = process.cwd(), offline = false } =
   success('Config is valid.');
   success('Required commands are available.');
 
+  for (const localPackage of resolvedLocalPackages) {
+    success(
+      `Local package ready: ${localPackage.name}@${localPackage.version || 'unknown'} (${localPackage.realPath})`
+    );
+  }
+
   if (offline) {
     success('Skipped repo reachability check (--offline).');
   } else {
@@ -155,7 +190,16 @@ export async function validateCommand({ cwd = process.cwd(), offline = false } =
   }
 
   await logRunEnd(run, 'passed', {
-    offline
+    offline,
+    localPackages: resolvedLocalPackages.map((entry) => ({
+      name: entry.name,
+      version: entry.version
+    }))
   });
   return true;
+}
+
+export async function doctorCommand(options = {}) {
+  info('Bridge doctor checks configuration, local tools, repository access, and local package substitutions.');
+  return validateCommand({ ...options, commandName: 'doctor' });
 }
