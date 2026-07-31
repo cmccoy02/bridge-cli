@@ -5,9 +5,10 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { cleanupLocalConfigAfterSuccessfulPush } from '../src/core/configLifecycle.js';
-import { patchCommand } from '../src/commands/patch.js';
 import { runCommand } from '../src/core/executor.js';
 import { getCurrentBranch, prepareCleanBase, pushBridgeBranch } from '../src/core/git.js';
+
+const cliPath = new URL('../bin/bridge.js', import.meta.url).pathname;
 
 const gitEnv = {
   ...process.env,
@@ -24,6 +25,10 @@ async function git(cwd, args, options = {}) {
     env: gitEnv,
     ...options
   });
+}
+
+function quote(value) {
+  return `'${String(value).replace(/'/g, `"'"'`)}'`;
 }
 
 async function pathExists(filePath) {
@@ -190,7 +195,7 @@ test('cleanupLocalConfigAfterSuccessfulPush keeps a config path that appears in 
   assert.equal(await pathExists(configPath), true);
 });
 
-test('patch dry-run executes in isolation without creating a commit or remote branch', async (t) => {
+test('patch defaults to a candidate-branch push without touching the local branch', async (t) => {
   const { repoDir, defaultBranch } = await createRepoWithOrigin(t, {
     defaultBranch: 'main'
   });
@@ -264,10 +269,18 @@ test('patch dry-run executes in isolation without creating a commit or remote br
   const headBeforeDryRun = (await git(repoDir, 'rev-parse HEAD')).stdout.trim();
 
   assert.notEqual(headBeforeDryRun, originalHead);
-  assert.equal(await patchCommand({ cwd: repoDir, dryRun: true }), true);
+  const result = await runCommand(
+    `${quote(process.execPath)} ${quote(cliPath)} patch`,
+    {
+      cwd: repoDir,
+      quiet: true,
+      env: gitEnv
+    }
+  );
+  assert.equal(result.success, true);
   assert.equal((await git(repoDir, 'rev-parse HEAD')).stdout.trim(), headBeforeDryRun);
   assert.equal(await getCurrentBranch(repoDir), 'main');
 
   const remoteBridgeBranches = await git(repoDir, 'ls-remote --heads origin bridge/test-*');
-  assert.equal(remoteBridgeBranches.stdout.trim(), '');
+  assert.match(remoteBridgeBranches.stdout, /refs\/heads\/bridge\/test-/);
 });

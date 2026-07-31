@@ -1,8 +1,11 @@
 # Bridge CLI
 
-Automated, non-breaking dependency updates. One command. One PR.
+The safe local pilot for dependency maintenance. One command, clear evidence,
+and a reviewable candidate branch for every passing update.
 
-Bridge copies the remote default branch into an isolated temp environment, updates dependencies using your config, runs security and reliability gates, and pushes a PR-ready branch without touching your local working directory.
+Bridge copies the remote default branch into an isolated temp environment,
+updates dependencies using your config, runs security and reliability gates,
+and can push a PR-ready branch without touching your local working directory.
 
 ## Quick Start
 
@@ -32,11 +35,36 @@ cd your-project
 bridge init
 ```
 
-3. Run a patch:
+3. Check the project setup, simulate a patch, then run it for real:
 
 ```bash
+bridge doctor
+bridge patch --dry-run
 bridge patch
+bridge report --latest
 ```
+
+`bridge patch` updates, validates, commits, and pushes a candidate branch only
+when every configured gate passes. The pull request remains the human approval
+boundary. Use `--dry-run` to run the same flow without committing or pushing.
+
+### Travelpass pilot
+
+From `/Users/connormccoy/CODE/travelpass.com`, the ready-to-run local pilot is:
+
+```bash
+bridge doctor --local-package @travelpass/design-system=../travelpass-design-system-master
+
+bridge patch --dry-run --scope . \
+  --local-package @travelpass/design-system=../travelpass-design-system-master
+
+bridge report --latest
+```
+
+The design system is used only inside Bridge's isolated workspace. Its normal
+registry reference is restored before comparison or staging, so no local path
+can enter a candidate branch. Remove any `.git` metadata from the local design
+system copy before linking it.
 
 ## Commands
 
@@ -65,7 +93,9 @@ Runs the patch engine end-to-end:
 - Clean/install/update/reinstall using config commands
 - Run blocking before/after validation scripts
 - Reject direct major-version changes, new vulnerabilities, and configured bundle regressions
-- Commit and push only through the protected-branch guard
+- Save a detailed, redacted `bridge-report.v1.json` for the run
+- Save full redacted output when a command fails
+- Commit and push only through the protected-branch guard after every gate passes
 - Print compare URL and final summary
 - Always cleanup temp directory
 
@@ -84,6 +114,9 @@ bridge patch --dry-run --scope deploy/description_bot
 # Replace a private npm package only inside the isolated run.
 bridge patch --dry-run \
   --local-package @travelpass/design-system=../travelpass-design-system-master
+
+# Run the update, validation, commit, and safe candidate-branch push.
+bridge patch
 ```
 
 Local-package substitutions require a package directory without `.git` metadata.
@@ -99,12 +132,42 @@ Validates config and runtime prerequisites.
 - Checks command availability in PATH
 - Optionally checks repo reachability (skip with `--offline`)
 
+### `bridge doctor`
+
+The local-pilot setup check. It performs the same config and tool checks as
+`bridge validate`, plus validates every requested `--local-package` link:
+
+- package path exists and contains the declared npm package name;
+- package is declared by the target project;
+- local copy contains no `.git` metadata;
+- package version and resolved location are displayed before a run starts.
+
+```bash
+bridge doctor --local-package @travelpass/design-system=../travelpass-design-system-master
+```
+
+### `bridge report --latest`
+
+Shows the most recent detailed run report: status, duration, candidate branch,
+dependency/audit/bundle results, and artifact locations. Add `--json` for the
+raw `bridge-report.v1` document or pass a run ID to inspect a specific run.
+
 ### `bridge config`
 
 Prints the current `bridge.config.json` to the terminal.
 
 Bridge also writes local operation logs to:
 - `~/.bridge/logs/operations.log`
+
+Each `bridge patch` run additionally writes:
+
+- `~/.bridge/runs/<run-id>/bridge-report.v1.json`
+- `~/.bridge/runs/<run-id>/failure.log` when a command fails
+- `~/.bridge/artifacts/<run-id>/...` for Visualizer reports
+
+Set `BRIDGE_HOME` to store all of these local artifacts somewhere else. Reports
+are redacted before writing and are the stable data contract for a future Bridge
+Console.
 
 ## Config Reference
 
@@ -163,6 +226,7 @@ Notes:
 - If `bridge.config.json` is already tracked, Bridge leaves your local copy in place.
 - Visualizer HTML reports are copied to `~/.bridge/artifacts/<run-id>/<scope>/` and are not added to the patch.
 - `beforeScripts` execute against the freshly installed baseline. `afterScripts` execute after updates. Any failure blocks the patch.
+- `bridge patch` pushes only a protected-branch-guarded candidate branch after every gate passes. Use `--dry-run` for a non-mutating simulation.
 
 ### Visualizer bundle regression gate
 
@@ -257,8 +321,9 @@ Bridge is intentionally simple and deterministic:
 5. Run vulnerability and Visualizer baselines
 6. Update and reinstall dependencies
 7. Compare dependency, vulnerability, bundle, and validation results
-8. Commit and push through the protected-branch guard only if every gate passes
-9. Cleanup temp directory and any first-init local config copy
+8. Write a redacted report and failure evidence for the local run
+9. Commit and push through the protected-branch guard only if every gate passes
+10. Cleanup temp directory and any first-init local config copy
 
 No language-specific core logic. Your config defines the workflow.
 

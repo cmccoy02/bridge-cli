@@ -8,7 +8,7 @@ import { configCommand } from '../src/commands/config.js';
 import { initCommand } from '../src/commands/init.js';
 import { patchCommand } from '../src/commands/patch.js';
 import { reportCommand } from '../src/commands/report.js';
-import { validateCommand } from '../src/commands/validate.js';
+import { doctorCommand, validateCommand } from '../src/commands/validate.js';
 import { error } from '../src/ui/logger.js';
 
 const require = createRequire(import.meta.url);
@@ -37,8 +37,8 @@ program
 
 program
   .command('patch')
-  .description('Copy, patch dependencies, and push a PR branch')
-  .option('--dry-run', 'Run the full patch and validation flow without committing or pushing')
+  .description('Safely copy, patch, validate dependencies, and push a candidate branch')
+  .option('--dry-run', 'Run without committing or pushing')
   .option('--keep-workspace', 'Keep the isolated workspace after a dry run for debugging')
   .option('--verbose', 'Stream command output while each phase runs')
   .option('--scope <path>', 'Run only the root (.) or one configured nested scope')
@@ -56,6 +56,27 @@ program
       scope: options.scope,
       localPackages: options.localPackage
     });
+    if (!ok) {
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command('doctor')
+  .description('Check local setup, project configuration, and local package links')
+  .option('--offline', 'Skip repository reachability check')
+  .option(
+    '--local-package <name=path>',
+    'Validate a local npm package substitution (repeatable)',
+    collectOption,
+    []
+  )
+  .action(async (options) => {
+    const ok = await doctorCommand({
+      offline: options.offline,
+      localPackages: options.localPackage
+    });
+
     if (!ok) {
       process.exitCode = 1;
     }
@@ -86,13 +107,15 @@ program
 
 program
   .command('report')
-  .description('Summarize dependency delta metrics from activity logs')
+  .description('Summarize Bridge history or show the latest detailed run report')
   .option('--json', 'Print machine-readable report JSON')
+  .option('--latest [run-id]', 'Show the newest saved detailed run report, or one run by ID')
   .option('--repo <name>', 'Filter metrics to a single repo name')
   .option('--limit <n>', 'Top-N packages for ranked lists', '10')
   .action(async (options) => {
     const ok = await reportCommand({
       json: options.json,
+      latest: options.latest,
       repo: options.repo,
       limit: options.limit
     });

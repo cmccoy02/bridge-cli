@@ -208,7 +208,8 @@ export async function initCommand({ cwd = process.cwd() } = {}) {
 
     success(`Created ${CONFIG_FILE_NAME}`);
     line();
-    info('Run `bridge patch` to create your first update PR.');
+    info('Run `bridge doctor`, then `bridge patch --dry-run` to validate the setup.');
+    info('Run `bridge patch` to push a candidate branch after all gates pass.');
     await logRunEnd(run, 'created', {
       packageManager: config.packageManager,
       hasRepoUrl: Boolean(config.repoUrl)
