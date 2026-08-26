@@ -158,6 +158,10 @@ export async function initCommand({ cwd = process.cwd() } = {}) {
       auditCommand: managerPreset.auditCommand || '',
       blockOnNewVulnerabilities: true,
       allowMajorUpdates: false,
+      pullRequest: {
+        enabled: true,
+        draft: false
+      },
       branchPrefix: (detailResponses.branchPrefix || DEFAULT_BRANCH_PREFIX).trim()
     };
 

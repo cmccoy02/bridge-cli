@@ -51,6 +51,7 @@ import {
   prepareNpmLocalPackages,
   restoreNpmLocalPackages
 } from '../core/localPackages.js';
+import { createPullRequest } from '../core/pullRequest.js';
 import { writeFailureEvidence, writeRunReport } from '../core/runReport.js';
 import { resolvePathInside, resolveRealPathInside } from '../core/pathSafety.js';
 import {
@@ -245,6 +246,28 @@ async function readTextFileIfExists(filePath) {
 
     throw error;
   }
+}
+
+async function restoreLockfileSnapshot({
+  run,
+  phase,
+  label,
+  lockfile,
+  lockfilePath,
+  content
+}) {
+  if (!lockfilePath || content === null) {
+    return false;
+  }
+
+  await fs.writeFile(lockfilePath, content, 'utf8');
+  await logPhase(run, phase, 'success', {
+    scope: label,
+    lockfile,
+    message: `Restored ${lockfile} after clean commands to preserve the validation snapshot.`
+  });
+  info(`Restored ${lockfile} (${label}) to preserve the validation snapshot.`);
+  return true;
 }
 
 function resolveScopePreset(scope) {
@@ -525,6 +548,7 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
   const hasMetricTarget = Boolean(lockfile && lockfileFormat);
   let shouldCollectMetrics = hasMetricTarget;
   let beforeLockfileContent = null;
+  let baselineLockfileContent = null;
   let metricsSummary = createDepDeltaSummary();
   let localPackageSnapshot = null;
 
@@ -585,6 +609,18 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
     });
   }
 
+  if (hasMetricTarget) {
+    try {
+      baselineLockfileContent = await readTextFileIfExists(lockfilePath);
+    } catch (baselineLockfileError) {
+      await logPhase(run, `baseline_lockfile:${label}`, 'warning', {
+        scope: label,
+        lockfile,
+        message: `Could not snapshot baseline lockfile: ${baselineLockfileError.message}`
+      });
+    }
+  }
+
   await runCommandList({
     run,
     phase: `clean:${label}`,
@@ -593,6 +629,15 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
     cwd: scopeDir,
     allowFailure: false,
     quiet: !verbose
+  });
+
+  await restoreLockfileSnapshot({
+    run,
+    phase: `baseline_lockfile:${label}`,
+    label,
+    lockfile,
+    lockfilePath,
+    content: baselineLockfileContent
   });
 
   const installResult = await runPhase({
@@ -697,6 +742,10 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
     }
   }
 
+  const candidateLockfileContent = hasMetricTarget
+    ? await readTextFileIfExists(lockfilePath)
+    : null;
+
   await runPhase({
     run,
     phase: `reinstall:${label}`,
@@ -711,6 +760,15 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
         cwd: scopeDir,
         allowFailure: false,
         quiet: !verbose
+      });
+
+      await restoreLockfileSnapshot({
+        run,
+        phase: `candidate_lockfile:${label}`,
+        label,
+        lockfile,
+        lockfilePath,
+        content: candidateLockfileContent
       });
 
       return runCommand(scope.installCommand, { cwd: scopeDir, quiet: !verbose });
@@ -853,6 +911,25 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
     }
   }
 
+  const afterValidationFailures = await runValidationScripts(
+    run,
+    `Running after-update validation (${label})...`,
+    scope.afterScripts,
+    scopeDir,
+    `afterScripts:${label}`,
+    verbose,
+    true
+  );
+
+  for (const validationFailure of afterValidationFailures) {
+    policyViolations.push(
+      `After-update validation failed in ${label}: ${validationFailure.command}.`
+    );
+  }
+
+  // Visualizer is deliberately the final configured check on both sides of the
+  // update. The app's own before/after arrays remain the primary validation
+  // pipeline; this optional adapter only captures and compares bundle metrics.
   const afterBundle = await runVisualizer({
     run,
     stage: 'after',
@@ -887,22 +964,6 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
         `Bundle size regression in ${label}: ${bundleComparison.metric} increased by ${formatBytes(bundleComparison.deltaBytes)} (${bundleComparison.deltaPercent.toFixed(2)}%), exceeding the configured threshold.`
       );
     }
-  }
-
-  const afterValidationFailures = await runValidationScripts(
-    run,
-    `Running after-update validation (${label})...`,
-    scope.afterScripts,
-    scopeDir,
-    `afterScripts:${label}`,
-    verbose,
-    true
-  );
-
-  for (const validationFailure of afterValidationFailures) {
-    policyViolations.push(
-      `After-update validation failed in ${label}: ${validationFailure.command}.`
-    );
   }
 
   if (policyViolations.length > 0) {
@@ -1045,6 +1106,7 @@ export async function patchCommand({
 
   let branchName = '';
   let compareUrl = '';
+  let pullRequest = null;
   let status = 'failed';
   let changedFilesCount = 0;
   let baseBranch = '';
@@ -1242,7 +1304,7 @@ export async function patchCommand({
       run,
       phase: 'push',
       spinnerText: 'Committing and pushing branch...',
-      successText: 'PR branch pushed. Open your repo to create the pull request.',
+      successText: 'Candidate branch pushed',
       task: async () => {
         await assertSafeWorkingBranch(tempDir, {
           branchName,
@@ -1262,6 +1324,27 @@ export async function patchCommand({
     const originUrl = await getOriginUrl(tempDir);
     compareUrl = getCompareUrl(originUrl || config.repoUrl, branchName);
 
+    pullRequest = await createPullRequest({
+      cwd: tempDir,
+      branchName,
+      baseBranch,
+      dependencySummary: depDeltaSummary,
+      options: config.pullRequest
+    });
+    await logPhase(run, 'pull_request', pullRequest.status === 'created' ? 'success' : 'skipped', {
+      branchName,
+      baseBranch,
+      pullRequestStatus: pullRequest.status,
+      url: pullRequest.url,
+      message: pullRequest.message
+    });
+
+    if (pullRequest.status === 'created') {
+      success(pullRequest.message);
+    } else {
+      warn(pullRequest.message);
+    }
+
     if (compareUrl) {
       line(compareUrl);
     }
@@ -1271,6 +1354,7 @@ export async function patchCommand({
       branchName,
       baseBranch,
       compareUrl,
+      pullRequest,
       changedFilesCount
     });
     return true;
@@ -1339,6 +1423,7 @@ export async function patchCommand({
         auditResults,
         bundleResults,
         localPackages: runtimeLocalPackages,
+        pullRequest,
         failure,
         failurePath
       });
@@ -1439,9 +1524,12 @@ export async function patchCommand({
           `Files changed: ${changedFilesCount}`,
           ...auditLines,
           ...bundleLines,
+          pullRequest?.url ? `Pull request: ${pullRequest.url}` : '',
           compareUrl ? `Compare: ${compareUrl}` : 'Compare URL unavailable.',
-          'Review your changes and merge when ready.'
-        ],
+          pullRequest?.status === 'created'
+            ? 'Review the pull request and merge when ready.'
+            : 'Review your changes and merge when ready.'
+        ].filter(Boolean),
         'Bridge complete'
       );
     }

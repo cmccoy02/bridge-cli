@@ -343,6 +343,7 @@ function formatRunStatus(status) {
 
 function formatRunSummary(report, reportPath) {
   const dependency = report.outcome?.dependencySummary;
+  const pullRequest = report.outcome?.pullRequest;
   const failure = report.outcome?.failure;
   const artifacts = Array.isArray(report.artifacts) ? report.artifacts : [];
   const auditLines = (report.outcome?.audits || []).map((audit) => {
@@ -373,6 +374,10 @@ function formatRunSummary(report, reportPath) {
       `Files changed: ${report.outcome?.changedFilesCount ?? 0}`,
       ...auditLines,
       ...bundleLines,
+      pullRequest?.url ? `Pull request: ${pullRequest.url}` : '',
+      pullRequest?.status && pullRequest.status !== 'created'
+        ? `Pull request: ${pullRequest.status}`
+        : '',
       failure ? `Failure: ${failure.message}` : '',
       `Report: ${reportPath}`,
       artifacts.length > 0 ? `Artifacts: ${artifacts.length}` : ''

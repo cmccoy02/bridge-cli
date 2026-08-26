@@ -1,17 +1,18 @@
 {
   "name": "my-project",
   "packageManager": "npm",
-  "installCommand": "npm install",
+  "installCommand": "npm ci",
   "updateCommand": "npm update",
-  "cleanCommands": [
-    "rm -rf node_modules",
-    "rm -f package-lock.json"
-  ],
+  "cleanCommands": ["rm -rf node_modules"],
   "beforeScripts": [],
   "afterScripts": [],
   "auditCommand": "npm audit --package-lock-only --json",
   "blockOnNewVulnerabilities": true,
   "allowMajorUpdates": false,
+  "pullRequest": {
+    "enabled": true,
+    "draft": false
+  },
   "bundleAnalysis": {
     "command": "ANALYZE=true npm run build",
     "reportPath": "dist/analyze.html",

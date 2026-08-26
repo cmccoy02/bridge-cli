@@ -218,9 +218,13 @@ test('patch defaults to a candidate-branch push without touching the local branc
     installCommand: 'node -e "process.exit(0)"',
     updateCommand:
       'node -e "const fs=require(\'fs\');const p=JSON.parse(fs.readFileSync(\'package-lock.json\',\'utf8\'));p.packages[\'node_modules/example\'].version=\'1.0.1\';fs.writeFileSync(\'package-lock.json\',JSON.stringify(p,null,2)+\'\\\\n\')"',
-    cleanCommands: [],
-    beforeScripts: ['node -e "process.exit(0)"'],
-    afterScripts: ['node -e "process.exit(0)"'],
+    cleanCommands: ['rm -f package-lock.json'],
+    beforeScripts: [
+      'node -e "const p=require(\'./package-lock.json\'); if (p.packages[\'node_modules/example\'].version !== \'1.0.0\') process.exit(1)"'
+    ],
+    afterScripts: [
+      'node -e "const p=require(\'./package-lock.json\'); if (p.packages[\'node_modules/example\'].version !== \'1.0.1\') process.exit(1)"'
+    ],
     auditCommand: `node -e 'console.log(${JSON.stringify(auditJson)})'`,
     blockOnNewVulnerabilities: true,
     branchPrefix: 'bridge/test',

@@ -295,6 +295,7 @@ export async function writeRunReport({
   auditResults = [],
   bundleResults = [],
   localPackages = [],
+  pullRequest = null,
   failure = null,
   failurePath = ''
 } = {}) {
@@ -341,6 +342,7 @@ export async function writeRunReport({
       dependencySummary: resolvedDependencySummary,
       audits: resolvedAudits,
       bundles: resolvedBundles,
+      pullRequest,
       failure: commandFailureDetails(failure)
     },
     phases: events

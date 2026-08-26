@@ -5,7 +5,8 @@ and a reviewable candidate branch for every passing update.
 
 Bridge copies the remote default branch into an isolated temp environment,
 updates dependencies using your config, runs security and reliability gates,
-and can push a PR-ready branch without touching your local working directory.
+pushes a candidate branch, and creates a pull request when GitHub CLI is already
+authenticated—all without touching your local working directory.
 
 ## Quick Start
 
@@ -92,11 +93,13 @@ Runs the patch engine end-to-end:
 - Capture the pre-update vulnerability and Visualizer baselines
 - Clean/install/update/reinstall using config commands
 - Run blocking before/after validation scripts
+- Run the optional Visualizer metric last in each validation phase
 - Reject direct major-version changes, new vulnerabilities, and configured bundle regressions
 - Save a detailed, redacted `bridge-report.v1.json` for the run
 - Save full redacted output when a command fails
 - Commit and push only through the protected-branch guard after every gate passes
-- Print compare URL and final summary
+- Create a pull request through an existing GitHub CLI session when available
+- Print pull request/compare URLs and final summary
 - Always cleanup temp directory
 
 Useful modes:
@@ -177,17 +180,20 @@ File: `bridge.config.json` (or `.bridge.config.json`)
 {
   "name": "my-project",
   "packageManager": "npm",
-  "installCommand": "npm install",
+  "installCommand": "npm ci",
   "updateCommand": "npm update",
   "cleanCommands": [
-    "rm -rf node_modules",
-    "rm -f package-lock.json"
+    "rm -rf node_modules"
   ],
   "beforeScripts": [],
   "afterScripts": [],
   "auditCommand": "npm audit --package-lock-only --json",
   "blockOnNewVulnerabilities": true,
   "allowMajorUpdates": false,
+  "pullRequest": {
+    "enabled": true,
+    "draft": false
+  },
   "bundleAnalysis": {
     "command": "ANALYZE=true npm run build",
     "reportPath": "dist/analyze.html",
@@ -214,7 +220,8 @@ Optional fields:
 - `auditCommand` (npm defaults to `npm audit --package-lock-only --json`)
 - `blockOnNewVulnerabilities` (defaults to `true`)
 - `allowMajorUpdates` (defaults to `false`; applies to direct dependencies)
-- `bundleAnalysis` (optional `rollup-plugin-visualizer` before/after comparison)
+- `pullRequest` (defaults to enabled; optional `{ "draft": true, "title": "...", "body": "..." }`)
+- `bundleAnalysis` (optional `rollup-plugin-visualizer` adapter and before/after comparison)
 - `branchPrefix` (defaults to `bridge/patch`)
 - `defaultBranch` (if omitted, Bridge detects `origin`'s default branch and records it in the PR branch)
 - `protectedBranches` (additional branch names Bridge must never push to)
@@ -225,15 +232,33 @@ Notes:
 - If `bridge.config.json` is not tracked yet, Bridge will include it in the patch commit automatically, then remove the trailing untracked local copy after the PR branch is pushed.
 - If `bridge.config.json` is already tracked, Bridge leaves your local copy in place.
 - Visualizer HTML reports are copied to `~/.bridge/artifacts/<run-id>/<scope>/` and are not added to the patch.
-- `beforeScripts` execute against the freshly installed baseline. `afterScripts` execute after updates. Any failure blocks the patch.
+- `beforeScripts` execute against the freshly installed baseline. `afterScripts` execute after the candidate is installed. Any failure blocks the patch.
+- When clean commands remove a supported lockfile, Bridge restores the committed baseline before the before scripts and restores the candidate lockfile before the after scripts. This prevents `npm install` from resolving an updated dependency tree on both sides of the comparison.
+- The Visualizer lives only in `bundleAnalysis`, not in `beforeScripts` or `afterScripts`. Bridge runs it after those arrays on both sides, so it is the last optional validation step rather than a duplicate build path.
 - `bridge patch` pushes only a protected-branch-guarded candidate branch after every gate passes. Use `--dry-run` for a non-mutating simulation.
+
+### Pull request creation
+
+Bridge creates a pull request after a successful candidate-branch push when
+`pullRequest.enabled` is not `false`. It uses an existing `gh` session or
+`GH_TOKEN`/`GITHUB_TOKEN`; Bridge never opens an interactive GitHub login or
+changes your Git credentials. If `gh` is missing or unauthenticated, the branch
+still pushes safely and Bridge prints the compare URL plus an actionable notice.
+
+Git credentials alone cannot create a pull request because creation uses the
+GitHub API. A one-time `gh auth login` or a scoped token is therefore required
+only for automatic PR creation. Disable it per repository with:
+
+```json
+{ "pullRequest": false }
+```
 
 ### Visualizer bundle regression gate
 
-Bridge supports the HTML output from
+Bridge currently supports the HTML output from
 [`rollup-plugin-visualizer`](https://github.com/btd/rollup-plugin-visualizer).
-Configure your build to write a report, then give Bridge the build command and
-report path:
+Configure the optional adapter with the build command and report path; do not
+put the same command in the before/after arrays:
 
 ```json
 {
@@ -247,9 +272,11 @@ report path:
 }
 ```
 
-Bridge runs the build before and after dependency updates, preserves both HTML
-reports for visual inspection, prints rendered/gzip/brotli totals, and blocks
-the patch if either configured threshold is exceeded. Omit
+Bridge runs the configured before/after arrays first, then runs the Visualizer
+build on each side, preserves both HTML reports for visual inspection, prints
+rendered/gzip/brotli totals, and blocks the patch if either configured threshold
+is exceeded. It is intentionally optional and currently does not claim support
+for Webpack/Rolldown-specific report formats or Python package analysis. Omit
 `maxIncreaseBytes` if the percentage threshold is sufficient.
 
 ## Config Examples
@@ -259,9 +286,9 @@ the patch if either configured threshold is exceeded. Omit
 ```json
 {
   "packageManager": "npm",
-  "installCommand": "npm install",
+  "installCommand": "npm ci",
   "updateCommand": "npm update",
-  "cleanCommands": ["rm -rf node_modules", "rm -f package-lock.json"],
+  "cleanCommands": ["rm -rf node_modules"],
   "auditCommand": "npm audit --package-lock-only --json",
   "blockOnNewVulnerabilities": true,
   "allowMajorUpdates": false
@@ -295,9 +322,9 @@ the patch if either configured threshold is exceeded. Omit
 ```json
 {
   "packageManager": "pnpm",
-  "installCommand": "pnpm install",
+  "installCommand": "pnpm install --frozen-lockfile",
   "updateCommand": "pnpm update",
-  "cleanCommands": ["rm -rf node_modules", "rm -f pnpm-lock.yaml"],
+  "cleanCommands": ["rm -rf node_modules"],
   "scopes": [
     {
       "path": "deploy/description_bot",
@@ -318,12 +345,13 @@ Bridge is intentionally simple and deterministic:
 2. Copy repo into an isolated temp directory
 3. Fetch origin, check out/pull the default branch, and create a Bridge branch
 4. Install and validate a reproducible before-update baseline
-5. Run vulnerability and Visualizer baselines
+5. Run the optional Visualizer baseline after the configured before scripts
 6. Update and reinstall dependencies
-7. Compare dependency, vulnerability, bundle, and validation results
-8. Write a redacted report and failure evidence for the local run
-9. Commit and push through the protected-branch guard only if every gate passes
-10. Cleanup temp directory and any first-init local config copy
+7. Run configured after scripts, then the optional Visualizer candidate build
+8. Compare dependency, vulnerability, bundle, and validation results
+9. Write a redacted report and failure evidence for the local run
+10. Commit/push through the protected-branch guard, then create a PR when existing GitHub API credentials are available
+11. Cleanup temp directory and any first-init local config copy
 
 No language-specific core logic. Your config defines the workflow.
 
