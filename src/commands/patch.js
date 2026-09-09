@@ -1328,18 +1328,24 @@ export async function patchCommand({
       cwd: tempDir,
       branchName,
       baseBranch,
+      repoUrl: originUrl || config.repoUrl,
       dependencySummary: depDeltaSummary,
       options: config.pullRequest
     });
-    await logPhase(run, 'pull_request', pullRequest.status === 'created' ? 'success' : 'skipped', {
-      branchName,
-      baseBranch,
-      pullRequestStatus: pullRequest.status,
-      url: pullRequest.url,
-      message: pullRequest.message
-    });
+    await logPhase(
+      run,
+      'pull_request',
+      ['created', 'existing'].includes(pullRequest.status) ? 'success' : 'skipped',
+      {
+        branchName,
+        baseBranch,
+        pullRequestStatus: pullRequest.status,
+        url: pullRequest.url,
+        message: pullRequest.message
+      }
+    );
 
-    if (pullRequest.status === 'created') {
+    if (['created', 'existing'].includes(pullRequest.status)) {
       success(pullRequest.message);
     } else {
       warn(pullRequest.message);
@@ -1526,7 +1532,7 @@ export async function patchCommand({
           ...bundleLines,
           pullRequest?.url ? `Pull request: ${pullRequest.url}` : '',
           compareUrl ? `Compare: ${compareUrl}` : 'Compare URL unavailable.',
-          pullRequest?.status === 'created'
+          ['created', 'existing'].includes(pullRequest?.status)
             ? 'Review the pull request and merge when ready.'
             : 'Review your changes and merge when ready.'
         ].filter(Boolean),

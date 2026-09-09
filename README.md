@@ -8,6 +8,10 @@ updates dependencies using your config, runs security and reliability gates,
 pushes a candidate branch, and creates a pull request when GitHub CLI is already
 authenticated—all without touching your local working directory.
 
+PR creation is pinned to the repository represented by `origin`, so a local
+run against a fork opens the PR on that fork instead of relying on GitHub CLI's
+upstream inference.
+
 ## Quick Start
 
 1. Install from the npm registry:
@@ -244,6 +248,8 @@ Bridge creates a pull request after a successful candidate-branch push when
 `GH_TOKEN`/`GITHUB_TOKEN`; Bridge never opens an interactive GitHub login or
 changes your Git credentials. If `gh` is missing or unauthenticated, the branch
 still pushes safely and Bridge prints the compare URL plus an actionable notice.
+Bridge passes the normalized `origin` repository explicitly to GitHub CLI and
+reuses an already-open PR when a retry reaches the PR-creation step again.
 
 Git credentials alone cannot create a pull request because creation uses the
 GitHub API. A one-time `gh auth login` or a scoped token is therefore required

@@ -1,7 +1,19 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createPullRequest } from '../src/core/pullRequest.js';
+import { createPullRequest, getGitHubRepository } from '../src/core/pullRequest.js';
+
+test('GitHub repository parsing supports HTTPS and SSH origin URLs', () => {
+  assert.equal(
+    getGitHubRepository('https://github.com/cmccoy02/travelpassbook.com.git'),
+    'cmccoy02/travelpassbook.com'
+  );
+  assert.equal(
+    getGitHubRepository('git@github.com:cmccoy02/travelpassbook.com.git'),
+    'cmccoy02/travelpassbook.com'
+  );
+  assert.equal(getGitHubRepository('https://gitlab.com/example/project.git'), '');
+});
 
 test('pull request creation reuses an available authenticated GitHub CLI', async () => {
   const commands = [];
@@ -9,6 +21,7 @@ test('pull request creation reuses an available authenticated GitHub CLI', async
     cwd: '/tmp/repo',
     branchName: 'bridge/patch-2026-08-26',
     baseBranch: 'main',
+    repoUrl: 'https://github.com/example/project.git',
     dependencySummary: { directChanged: 2, transitiveChanged: 5 },
     options: { draft: true },
     commandExistsFn: async () => true,
@@ -31,9 +44,44 @@ test('pull request creation reuses an available authenticated GitHub CLI', async
   assert.equal(result.url, 'https://github.com/example/project/pull/42');
   assert.equal(commands[0], 'gh auth status');
   assert.match(commands[1], /gh pr create/);
+  assert.match(commands[1], /--repo 'example\/project'/);
   assert.match(commands[1], /--base 'main'/);
   assert.match(commands[1], /--head 'bridge\/patch-2026-08-26'/);
   assert.match(commands[1], /--draft/);
+});
+
+test('pull request creation returns an existing PR after a retry', async () => {
+  const commands = [];
+  const result = await createPullRequest({
+    cwd: '/tmp/repo',
+    branchName: 'bridge/patch-2026-08-26',
+    baseBranch: 'main',
+    repoUrl: 'git@github.com:example/project.git',
+    commandExistsFn: async () => true,
+    runCommandFn: async (command) => {
+      commands.push(command);
+
+      if (command === 'gh auth status') {
+        return { success: true, stdout: '', stderr: '' };
+      }
+
+      if (command.startsWith('gh pr create')) {
+        return { success: false, stdout: '', stderr: 'a pull request already exists' };
+      }
+
+      return {
+        success: true,
+        stdout: 'https://github.com/example/project/pull/42\n',
+        stderr: ''
+      };
+    }
+  });
+
+  assert.equal(result.status, 'existing');
+  assert.equal(result.url, 'https://github.com/example/project/pull/42');
+  assert.match(commands[2], /gh pr view/);
+  assert.match(commands[2], /--repo 'example\/project'/);
+  assert.match(commands[2], /--head 'bridge\/patch-2026-08-26'/);
 });
 
 test('pull request creation does not require GitHub CLI to push a branch', async () => {

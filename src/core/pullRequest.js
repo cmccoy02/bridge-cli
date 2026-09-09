@@ -23,6 +23,24 @@ function findPullRequestUrl(output) {
   return match?.[0] || '';
 }
 
+export function getGitHubRepository(remoteUrl) {
+  const value = String(remoteUrl || '').trim();
+
+  if (!value) {
+    return '';
+  }
+
+  const match = value.match(
+    /^(?:https?:\/\/|ssh:\/\/git@|git@)github\.com(?::|\/)([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/i
+  );
+
+  if (!match) {
+    return '';
+  }
+
+  return `${match[1]}/${match[2]}`;
+}
+
 function defaultBody({ branchName, baseBranch, dependencySummary }) {
   const direct = Number(dependencySummary?.directChanged) || 0;
   const transitive = Number(dependencySummary?.transitiveChanged) || 0;
@@ -42,6 +60,7 @@ export async function createPullRequest({
   cwd,
   branchName,
   baseBranch,
+  repoUrl,
   dependencySummary,
   options,
   commandExistsFn = commandExists,
@@ -78,8 +97,10 @@ export async function createPullRequest({
 
   const title = config.title || 'bridge: update dependencies (non-breaking)';
   const body = config.body || defaultBody({ branchName, baseBranch, dependencySummary });
+  const repository = getGitHubRepository(repoUrl);
   const command = [
     'gh pr create',
+    repository ? `--repo ${shellQuote(repository)}` : '',
     `--base ${shellQuote(baseBranch)}`,
     `--head ${shellQuote(branchName)}`,
     `--title ${shellQuote(title)}`,
@@ -96,6 +117,30 @@ export async function createPullRequest({
   const output = `${created.stdout || ''}\n${created.stderr || ''}`.trim();
 
   if (!created.success) {
+    const existingCommand = [
+      'gh pr view',
+      repository ? `--repo ${shellQuote(repository)}` : '',
+      `--head ${shellQuote(branchName)}`,
+      '--json url',
+      '--jq .url'
+    ]
+      .filter(Boolean)
+      .join(' ');
+    const existing = await runCommandFn(existingCommand, {
+      cwd,
+      allowFailure: true,
+      quiet: true
+    });
+    const existingUrl = findPullRequestUrl(existing.stdout || existing.stderr);
+
+    if (existing.success && existingUrl) {
+      return {
+        status: 'existing',
+        url: existingUrl,
+        message: `Pull request already open: ${existingUrl}`
+      };
+    }
+
     return {
       status: 'failed',
       url: '',
