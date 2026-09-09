@@ -12,7 +12,7 @@ import {
   inspectNpmLocalPackage,
   parseLocalPackageArguments
 } from '../core/localPackages.js';
-import { error, info, line, success } from '../ui/logger.js';
+import { error, info, line, success, warn } from '../ui/logger.js';
 
 function firstToken(commandString) {
   if (typeof commandString !== 'string' || commandString.trim().length === 0) {
@@ -58,6 +58,7 @@ export async function validateCommand({
 
   let config;
   const issues = [];
+  const notices = [];
   let resolvedLocalPackages = [];
 
   try {
@@ -140,6 +141,25 @@ export async function validateCommand({
       }
     }
 
+    if (config.pullRequest?.enabled !== false) {
+      if (!(await commandExists('gh'))) {
+        notices.push(
+          'GitHub CLI is not installed. Bridge can push a branch, but cannot create a pull request until gh is available.'
+        );
+      } else {
+        const ghAuth = await runCommand('gh auth status', {
+          allowFailure: true,
+          quiet: true
+        });
+
+        if (!ghAuth.success) {
+          notices.push(
+            'GitHub CLI is not authenticated. Bridge will reuse an existing gh session or GH_TOKEN/GITHUB_TOKEN to create pull requests.'
+          );
+        }
+      }
+    }
+
     try {
       const requestedLocalPackages = parseLocalPackageArguments(
         localPackageArguments,
@@ -183,6 +203,10 @@ export async function validateCommand({
     );
   }
 
+  for (const notice of notices) {
+    warn(notice);
+  }
+
   if (offline) {
     success('Skipped repo reachability check (--offline).');
   } else {
@@ -191,6 +215,7 @@ export async function validateCommand({
 
   await logRunEnd(run, 'passed', {
     offline,
+    notices,
     localPackages: resolvedLocalPackages.map((entry) => ({
       name: entry.name,
       version: entry.version

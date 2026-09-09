@@ -100,6 +100,34 @@ test('config validation rejects traversal and duplicate scopes', async (t) => {
   );
 });
 
+test('config validation prevents duplicate inline and native visualizer runs', async (t) => {
+  const root = await makeTempDir(t);
+  const config = {
+    packageManager: 'npm',
+    installCommand: 'npm ci',
+    updateCommand: 'npm update',
+    cleanCommands: ['rm -rf node_modules'],
+    beforeScripts: ['ANALYZE=true npm run build'],
+    bundleAnalysis: {
+      command: 'ANALYZE=true npm run build',
+      reportPath: 'dist/analyze.html'
+    }
+  };
+
+  await fs.writeFile(
+    path.join(root, 'bridge.config.json'),
+    `${JSON.stringify(config)}\n`,
+    'utf8'
+  );
+
+  await assert.rejects(
+    () => loadConfig(root),
+    (error) =>
+      error instanceof ConfigError &&
+      error.message.includes('beforeScripts includes a visualizer command')
+  );
+});
+
 test('npm audit snapshots are parsed and security regressions are detected', () => {
   const before = {
     parsed: true,

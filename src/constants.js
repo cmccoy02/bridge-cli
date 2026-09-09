@@ -11,9 +11,9 @@ export const REQUIRED_CONFIG_FIELDS = [
 export const PACKAGE_MANAGER_PRESETS = {
   npm: {
     label: 'Node.js project using npm',
-    installCommand: 'npm install',
+    installCommand: 'npm ci',
     updateCommand: 'npm update',
-    cleanCommands: ['rm -rf node_modules', 'rm -f package-lock.json'],
+    cleanCommands: ['rm -rf node_modules'],
     auditCommand: 'npm audit --package-lock-only --json',
     lockfile: 'package-lock.json',
     lockfileFormat: 'json-npm',
@@ -23,7 +23,7 @@ export const PACKAGE_MANAGER_PRESETS = {
     label: 'Node.js project using yarn',
     installCommand: 'yarn install',
     updateCommand: 'yarn upgrade',
-    cleanCommands: ['rm -rf node_modules', 'rm -f yarn.lock'],
+    cleanCommands: ['rm -rf node_modules'],
     lockfile: 'yarn.lock',
     lockfileFormat: null,
     manifest: 'package.json'
@@ -32,7 +32,7 @@ export const PACKAGE_MANAGER_PRESETS = {
     label: 'Node.js project using pnpm',
     installCommand: 'pnpm install',
     updateCommand: 'pnpm update',
-    cleanCommands: ['rm -rf node_modules', 'rm -f pnpm-lock.yaml'],
+    cleanCommands: ['rm -rf node_modules'],
     lockfile: 'pnpm-lock.yaml',
     lockfileFormat: null,
     manifest: 'package.json'
@@ -130,5 +130,9 @@ export const DEFAULT_CONFIG = {
   auditCommand: PACKAGE_MANAGER_PRESETS.npm.auditCommand,
   blockOnNewVulnerabilities: true,
   allowMajorUpdates: false,
+  pullRequest: {
+    enabled: true,
+    draft: false
+  },
   branchPrefix: DEFAULT_BRANCH_PREFIX
 };

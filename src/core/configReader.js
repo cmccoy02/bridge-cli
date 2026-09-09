@@ -49,6 +49,21 @@ function normalizeBundleAnalysis(value) {
   };
 }
 
+function normalizePullRequest(value) {
+  if (value === false) {
+    return { enabled: false, draft: false, title: '', body: '' };
+  }
+
+  const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+
+  return {
+    enabled: source.enabled !== false,
+    draft: source.draft === true,
+    title: typeof source.title === 'string' ? source.title.trim() : '',
+    body: typeof source.body === 'string' ? source.body.trim() : ''
+  };
+}
+
 function normalizeScope(scope) {
   if (!scope || typeof scope !== 'object' || Array.isArray(scope)) {
     return null;
@@ -155,6 +170,61 @@ function validateBundleAnalysis(value, label, issues) {
   }
 }
 
+function validatePullRequest(value, issues) {
+  if (value === undefined || value === null || value === false) {
+    return;
+  }
+
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    issues.push('pullRequest must be false or an object');
+    return;
+  }
+
+  if ('enabled' in value && typeof value.enabled !== 'boolean') {
+    issues.push('pullRequest.enabled must be true or false');
+  }
+
+  if ('draft' in value && typeof value.draft !== 'boolean') {
+    issues.push('pullRequest.draft must be true or false');
+  }
+
+  for (const field of ['title', 'body']) {
+    if (field in value && typeof value[field] !== 'string') {
+      issues.push(`pullRequest.${field} must be a string`);
+    }
+  }
+}
+
+function hasInlineVisualizerCommand(commands) {
+  if (!Array.isArray(commands)) {
+    return false;
+  }
+
+  return commands.some(
+    (command) =>
+      typeof command === 'string' &&
+      /rollup-plugin-visualizer|visualizer|ANALYZE\s*=|analyze\.html/i.test(command)
+  );
+}
+
+function validateVisualizerOwnership(config, label, bundleLabel, issues) {
+  if (!config.bundleAnalysis) {
+    return;
+  }
+
+  if (hasInlineVisualizerCommand(config.beforeScripts)) {
+    issues.push(
+      `${label}.beforeScripts includes a visualizer command. Configure it only in ${bundleLabel} so Bridge can capture the baseline itself.`
+    );
+  }
+
+  if (hasInlineVisualizerCommand(config.afterScripts)) {
+    issues.push(
+      `${label}.afterScripts includes a visualizer command. Configure it only in ${bundleLabel} so Bridge can capture the candidate itself.`
+    );
+  }
+}
+
 function findShapeIssues(config) {
   const issues = [];
 
@@ -186,6 +256,8 @@ function findShapeIssues(config) {
   }
 
   validateBundleAnalysis(config.bundleAnalysis, 'bundleAnalysis', issues);
+  validateVisualizerOwnership(config, 'root', 'bundleAnalysis', issues);
+  validatePullRequest(config.pullRequest, issues);
 
   if ('protectedBranches' in config && !Array.isArray(config.protectedBranches)) {
     issues.push('protectedBranches must be an array of branch names');
@@ -275,6 +347,12 @@ function findShapeIssues(config) {
           `scopes[${index}].bundleAnalysis`,
           issues
         );
+        validateVisualizerOwnership(
+          scope,
+          `scopes[${index}]`,
+          `scopes[${index}].bundleAnalysis`,
+          issues
+        );
 
         if (
           'pythonZeroMajor' in scope &&
@@ -318,6 +396,7 @@ export function normalizeConfig(config) {
     allowMajorUpdates:
       typeof config.allowMajorUpdates === 'boolean' ? config.allowMajorUpdates : false,
     bundleAnalysis: normalizeBundleAnalysis(config.bundleAnalysis),
+    pullRequest: normalizePullRequest(config.pullRequest),
     scopes,
     branchPrefix:
       typeof config.branchPrefix === 'string' && config.branchPrefix.trim()
