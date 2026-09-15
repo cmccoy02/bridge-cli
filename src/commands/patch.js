@@ -4,7 +4,10 @@ import path from 'node:path';
 
 import { DEFAULT_BRANCH_PREFIX, PACKAGE_MANAGER_PRESETS } from '../constants.js';
 import { formatConfig, loadConfig } from '../core/configReader.js';
-import { cleanupLocalConfigAfterSuccessfulPush } from '../core/configLifecycle.js';
+import {
+  cleanupLocalConfigAfterSuccessfulPush,
+  DEFAULT_CONFIG_RETENTION_POLICY
+} from '../core/configLifecycle.js';
 import {
   getActivityLogPath,
   logDepDelta,
@@ -16,10 +19,19 @@ import {
   makeRunContext
 } from '../core/activityLogger.js';
 import {
+  BLOCKING_SEVERITIES,
   captureAuditSnapshot,
   compareAuditSnapshots,
-  formatAuditCounts
+  createAuditComparisonReport,
+  formatAuditCounts,
+  formatAuditDelta
 } from '../core/audit.js';
+import {
+  captureScriptResults,
+  compareScriptResults,
+  createScriptDiffReport,
+  formatScriptDiffSummary
+} from '../core/scriptDiff.js';
 import {
   compareBundleAnalyses,
   formatBytes,
@@ -39,9 +51,12 @@ import {
   stageAll
 } from '../core/git.js';
 import {
+  checkTransitiveMajorPolicy,
   classifyBump,
   computeDepDeltas,
   createDepDeltaSummary,
+  DEFAULT_TRANSITIVE_MAJOR_POLICY,
+  formatTransitiveMajorSummary,
   mergeDepDeltaSummaries,
   parseDirectDeps
 } from '../core/lockfileDiff.js';
@@ -420,7 +435,7 @@ async function runValidationScripts(
   collectFailures = false
 ) {
   if (!Array.isArray(scripts) || scripts.length === 0) {
-    return [];
+    return { results: [], failures: [] };
   }
 
   const results = await runCommandList({
@@ -433,7 +448,10 @@ async function runValidationScripts(
     quiet: !verbose
   });
 
-  return results.filter((result) => !result.success);
+  return {
+    results,
+    failures: results.filter((result) => !result.success)
+  };
 }
 
 async function runAudit({
@@ -656,14 +674,24 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
     line(normalizeCommandOutput(installResult.stdout, 220) || 'Install output: (no stdout)');
   }
 
-  await runValidationScripts(
+  const beforeValidation = await runValidationScripts(
     run,
     `Running before-update validation (${label})...`,
     scope.beforeScripts,
     scopeDir,
     `beforeScripts:${label}`,
-    verbose
+    verbose,
+    true
   );
+  const beforeScriptResults = captureScriptResults(beforeValidation.results);
+
+  if (beforeValidation.failures.length > 0) {
+    warn(
+      `Before-scripts baseline: ${beforeValidation.failures.length} failure(s) detected. ` +
+      `These will be treated as baseline noise if they persist after the update.`
+    );
+  }
+
   const beforeBundle = await runVisualizer({
     run,
     stage: 'before',
@@ -843,6 +871,33 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
             );
           }
 
+          const transitiveMajorPolicy =
+            scope.transitiveMajorPolicy || DEFAULT_TRANSITIVE_MAJOR_POLICY;
+          const transitiveMajorResult = checkTransitiveMajorPolicy(
+            deltas,
+            transitiveMajorPolicy
+          );
+
+          if (transitiveMajorResult.transitiveMajorCount > 0) {
+            info(`${label}: ${formatTransitiveMajorSummary(transitiveMajorResult)}`);
+
+            if (transitiveMajorResult.shouldBlock) {
+              throw new PatchPolicyError(transitiveMajorResult.message);
+            }
+
+            if (transitiveMajorResult.shouldWarn) {
+              warn(transitiveMajorResult.message);
+            }
+
+            await logPhase(run, `transitive_major:${label}`, transitiveMajorResult.shouldBlock ? 'failed' : 'warning', {
+              scope: label,
+              repo: repoName,
+              policy: transitiveMajorPolicy,
+              count: transitiveMajorResult.transitiveMajorCount,
+              packages: transitiveMajorResult.packages
+            });
+          }
+
           metricsSummary = mergeDepDeltaSummaries(metricsSummary, summary);
 
           for (const delta of deltas) {
@@ -896,22 +951,26 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
     scopeDir,
     verbose
   });
-  const auditComparison = compareAuditSnapshots(beforeAudit, afterAudit);
+  const blockingSeverities = scope.auditBlockingSeverities || BLOCKING_SEVERITIES;
+  const auditComparison = compareAuditSnapshots(beforeAudit, afterAudit, {
+    blockingSeverities
+  });
 
   if (auditComparison.comparable) {
-    const deltaPrefix = auditComparison.delta.total > 0 ? '+' : '';
-    info(
-      `Vulnerability delta (${label}): ${deltaPrefix}${auditComparison.delta.total} total`
-    );
+    info(`Vulnerability delta (${label}): ${formatAuditDelta(auditComparison)}`);
 
-    if (scope.blockOnNewVulnerabilities && auditComparison.regressed) {
+    if (scope.blockOnNewVulnerabilities && auditComparison.blocked) {
       policyViolations.push(
-        `Security regression in ${label}: vulnerability count increased from ${beforeAudit.counts.total} to ${afterAudit.counts.total}.`
+        `Security regression in ${label}: ${auditComparison.blockReason}`
+      );
+    } else if (scope.blockOnNewVulnerabilities && auditComparison.regressed) {
+      warn(
+        `Non-blocking vulnerability changes in ${label}: total ${beforeAudit.counts.total} -> ${afterAudit.counts.total}`
       );
     }
   }
 
-  const afterValidationFailures = await runValidationScripts(
+  const afterValidation = await runValidationScripts(
     run,
     `Running after-update validation (${label})...`,
     scope.afterScripts,
@@ -920,12 +979,36 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
     verbose,
     true
   );
+  const afterScriptResults = captureScriptResults(afterValidation.results);
 
-  for (const validationFailure of afterValidationFailures) {
-    policyViolations.push(
-      `After-update validation failed in ${label}: ${validationFailure.command}.`
+  const scriptComparison = compareScriptResults(beforeScriptResults, afterScriptResults);
+  const scriptDiffReport = createScriptDiffReport(beforeScriptResults, afterScriptResults);
+
+  if (scriptComparison.hasNewFailures) {
+    for (const newFailure of scriptComparison.newFailures) {
+      policyViolations.push(
+        `After-update validation failed in ${label}: ${newFailure.command} (NEW failure, exit code ${newFailure.exitCode}).`
+      );
+    }
+  }
+
+  if (scriptComparison.hasBaselineNoise) {
+    warn(
+      `${label}: ${scriptComparison.baselineFailureCount} baseline script failure(s) persist (not blocking).`
     );
   }
+
+  if (scriptComparison.resolvedCount > 0) {
+    success(
+      `${label}: ${scriptComparison.resolvedCount} baseline script failure(s) resolved.`
+    );
+  }
+
+  await logPhase(run, `scriptDiff:${label}`, scriptComparison.hasNewFailures ? 'failed' : 'success', {
+    scope: label,
+    repo: repoName,
+    ...scriptDiffReport.diff
+  });
 
   // Visualizer is deliberately the final configured check on both sides of the
   // update. The app's own before/after arrays remain the primary validation
@@ -967,7 +1050,8 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
   }
 
   if (policyViolations.length > 0) {
-    throw new PatchPolicyError(policyViolations.join(' '), afterValidationFailures[0]);
+    const firstFailure = scriptComparison.newFailures[0] || afterValidation.failures[0];
+    throw new PatchPolicyError(policyViolations.join(' '), firstFailure);
   }
 
   return {
@@ -976,13 +1060,19 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
       label,
       before: beforeAudit,
       after: afterAudit,
-      comparison: auditComparison
+      comparison: auditComparison,
+      report: createAuditComparisonReport(beforeAudit, afterAudit, auditComparison)
     },
     bundle: {
       label,
       before: beforeBundle,
       after: afterBundle,
       comparison: bundleComparison
+    },
+    validation: {
+      label,
+      scriptDiff: scriptDiffReport,
+      comparison: scriptComparison
     }
   };
 }
@@ -1092,6 +1182,7 @@ export async function patchCommand({
   let depDeltaSummary = createDepDeltaSummary();
   const auditResults = [];
   const bundleResults = [];
+  const validationResults = [];
   const portableOriginUrl = resolvePortableOriginUrl(cwd, await getOriginUrl(cwd));
   let runtimeLocalPackages = [];
 
@@ -1227,6 +1318,7 @@ export async function patchCommand({
       );
       auditResults.push(scopeResult.audit);
       bundleResults.push(scopeResult.bundle);
+      validationResults.push(scopeResult.validation);
     }
 
     await logDepDeltaSummary(run, {
@@ -1330,6 +1422,9 @@ export async function patchCommand({
       baseBranch,
       repoUrl: originUrl || config.repoUrl,
       dependencySummary: depDeltaSummary,
+      auditResults,
+      validationResults,
+      runReportPath,
       options: config.pullRequest
     });
     await logPhase(
@@ -1428,6 +1523,7 @@ export async function patchCommand({
         dependencySummary: depDeltaSummary,
         auditResults,
         bundleResults,
+        validationResults,
         localPackages: runtimeLocalPackages,
         pullRequest,
         failure,
@@ -1450,14 +1546,19 @@ export async function patchCommand({
     }
 
     if (status === 'pushed') {
+      const retentionPolicy =
+        config?.configRetentionPolicy || DEFAULT_CONFIG_RETENTION_POLICY;
       const configCleanup = await cleanupLocalConfigAfterSuccessfulPush(cwd, configFileName, {
         onWarning: (cleanupError) => {
           warn(`Could not clean up ${configFileName}: ${cleanupError.message}`);
-        }
+        },
+        retentionPolicy
       });
 
       if (configCleanup.removed) {
         info(`Removed local untracked ${configFileName} after successful push.`);
+      } else if (configCleanup.reason === 'policy_keep') {
+        info(`Kept local ${configFileName} per retention policy.`);
       }
     }
 

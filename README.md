@@ -223,7 +223,10 @@ Optional fields:
 - `afterScripts`
 - `auditCommand` (npm defaults to `npm audit --package-lock-only --json`)
 - `blockOnNewVulnerabilities` (defaults to `true`)
+- `auditBlockingSeverities` (defaults to `["critical", "high"]`; severity levels that block when increased)
 - `allowMajorUpdates` (defaults to `false`; applies to direct dependencies)
+- `transitiveMajorPolicy` (defaults to `"warn"`; options: `"block"`, `"warn"`, `"allow"`)
+- `configRetentionPolicy` (defaults to `"keep"`; options: `"keep"`, `"delete"`)
 - `pullRequest` (defaults to enabled; optional `{ "draft": true, "title": "...", "body": "..." }`)
 - `bundleAnalysis` (optional `rollup-plugin-visualizer` adapter and before/after comparison)
 - `branchPrefix` (defaults to `bridge/patch`)
@@ -233,13 +236,89 @@ Optional fields:
 - `pythonZeroMajor` (how the Python requirements updater treats `0.x` pins): `"skip"` (default) leaves them byte-identical; `"patch"` keeps major+minor and updates the patch; `"minor"` allows minor updates while keeping major zero.
 
 Notes:
-- If `bridge.config.json` is not tracked yet, Bridge will include it in the patch commit automatically, then remove the trailing untracked local copy after the PR branch is pushed.
+- If `bridge.config.json` is not tracked yet, Bridge will include it in the patch commit automatically. The local untracked copy is kept by default for weekly automation (see `configRetentionPolicy`).
 - If `bridge.config.json` is already tracked, Bridge leaves your local copy in place.
 - Visualizer HTML reports are copied to `~/.bridge/artifacts/<run-id>/<scope>/` and are not added to the patch.
-- `beforeScripts` execute against the freshly installed baseline. `afterScripts` execute after the candidate is installed. Any failure blocks the patch.
+- `beforeScripts` execute against the freshly installed baseline. `afterScripts` execute after the candidate is installed. Only NEW script failures block the patch; baseline failures are logged as warnings.
 - When clean commands remove a supported lockfile, Bridge restores the committed baseline before the before scripts and restores the candidate lockfile before the after scripts. This prevents `npm install` from resolving an updated dependency tree on both sides of the comparison.
 - The Visualizer lives only in `bundleAnalysis`, not in `beforeScripts` or `afterScripts`. Bridge runs it after those arrays on both sides, so it is the last optional validation step rather than a duplicate build path.
 - `bridge patch` pushes only a protected-branch-guarded candidate branch after every gate passes. Use `--dry-run` for a non-mutating simulation.
+
+### P0 reliability features
+
+These features were added to make `bridge patch` hands-off enough for weekly automation:
+
+#### Before/after script diff
+
+Bridge now captures baseline script results (exit codes and output) before the update and compares them with after-update results. Only NEW failures block the patch:
+
+- Baseline failures that persist are logged as warnings but do not block
+- Resolved failures (failures that now pass) are reported as improvements
+- New failures (scripts that fail only after the update) block the patch
+
+This prevents flaky or pre-existing lint/test failures from blocking otherwise-good patches.
+
+#### Severity-aware audit gate
+
+The vulnerability audit now compares by severity bucket, not just total count:
+
+```json
+{
+  "blockOnNewVulnerabilities": true,
+  "auditBlockingSeverities": ["critical", "high"]
+}
+```
+
+- By default, only increases in `critical` or `high` severity block the patch
+- Increases in `moderate` or `low` are logged but do not block
+- Terminal and PR output shows per-severity deltas (e.g., "critical: +1, high: -2")
+
+#### Transitive major policy
+
+Bridge now detects major version bumps in transitive dependencies:
+
+```json
+{
+  "transitiveMajorPolicy": "warn"
+}
+```
+
+- `"block"`: Fail the patch if any transitive dependency has a major bump
+- `"warn"` (default): Log a warning but allow the patch
+- `"allow"`: No logging, allow transitive majors silently
+
+This catches cases like `@babel/runtime` going 7→8 via a direct dependency update.
+
+#### Doctor/validate hardening
+
+`bridge doctor` and `bridge validate` now check:
+
+- Git `user.name` and `user.email` are configured (required for commits)
+- GitHub CLI (`gh`) is installed and authenticated when PR creation is enabled
+- npm version, with guidance if using a version with known Arborist bugs
+
+#### Durable config lifecycle
+
+The local `bridge.config.json` is now kept by default after a successful push:
+
+```json
+{
+  "configRetentionPolicy": "keep"
+}
+```
+
+- `"keep"` (default): Keep the local config file for weekly automation
+- `"delete"`: Delete the untracked config after successful push (legacy behavior)
+
+#### Richer reports and PR body
+
+The `bridge-report.v1.json` and PR body now include:
+
+- Node/npm versions and platform info
+- Gate decisions with pass/fail status and reasons
+- Script diff outcomes (new failures, baseline noise, resolved)
+- Audit severity deltas per scope
+- Phase timing information
 
 ### Pull request creation
 

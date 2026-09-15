@@ -1,6 +1,7 @@
 import { runCommand } from './executor.js';
 
-const SEVERITIES = ['info', 'low', 'moderate', 'high', 'critical'];
+export const SEVERITIES = ['info', 'low', 'moderate', 'high', 'critical'];
+export const BLOCKING_SEVERITIES = ['critical', 'high'];
 
 function emptyCounts() {
   return {
@@ -95,34 +96,59 @@ export async function captureAuditSnapshot({
   }
 }
 
-export function compareAuditSnapshots(before, after) {
+export function compareAuditSnapshots(before, after, options = {}) {
   if (!before?.parsed || !after?.parsed) {
     return {
       comparable: false,
       regressed: false,
+      blocked: false,
+      blockReason: '',
       improvements: 0,
       regressions: 0,
-      delta: emptyCounts()
+      delta: emptyCounts(),
+      severityDeltas: {}
     };
   }
 
+  const blockingSeverities = options.blockingSeverities || BLOCKING_SEVERITIES;
   const delta = emptyCounts();
+  const severityDeltas = {};
 
   for (const severity of [...SEVERITIES, 'total']) {
-    delta[severity] = after.counts[severity] - before.counts[severity];
+    const change = after.counts[severity] - before.counts[severity];
+    delta[severity] = change;
+    severityDeltas[severity] = {
+      before: before.counts[severity],
+      after: after.counts[severity],
+      delta: change
+    };
   }
+
+  const regressed =
+    delta.total > 0 ||
+    delta.critical > 0 ||
+    delta.high > 0 ||
+    delta.moderate > 0 ||
+    delta.low > 0;
+
+  const blockingIncreases = blockingSeverities.filter(
+    (severity) => delta[severity] > 0
+  );
+  const blocked = blockingIncreases.length > 0;
+  const blockReason = blocked
+    ? `Increased vulnerabilities: ${blockingIncreases.map((s) => `${s} +${delta[s]}`).join(', ')}`
+    : '';
 
   return {
     comparable: true,
-    regressed:
-      delta.total > 0 ||
-      delta.critical > 0 ||
-      delta.high > 0 ||
-      delta.moderate > 0 ||
-      delta.low > 0,
+    regressed,
+    blocked,
+    blockReason,
+    blockingSeverities,
     improvements: Math.max(0, -delta.total),
     regressions: Math.max(0, delta.total),
-    delta
+    delta,
+    severityDeltas
   };
 }
 
@@ -137,4 +163,53 @@ export function formatAuditCounts(snapshot) {
 
   const { counts } = snapshot;
   return `${counts.total} total (${counts.critical} critical / ${counts.high} high / ${counts.moderate} moderate / ${counts.low} low)`;
+}
+
+export function formatAuditDelta(comparison) {
+  if (!comparison?.comparable) {
+    return 'Audit comparison: not available';
+  }
+
+  const { delta, severityDeltas } = comparison;
+  const parts = [];
+
+  for (const severity of SEVERITIES) {
+    const d = delta[severity];
+    if (d !== 0) {
+      const sign = d > 0 ? '+' : '';
+      parts.push(`${severity}: ${sign}${d}`);
+    }
+  }
+
+  if (parts.length === 0) {
+    return 'Audit delta: no change';
+  }
+
+  const totalSign = delta.total > 0 ? '+' : '';
+  return `Audit delta: ${totalSign}${delta.total} total (${parts.join(', ')})`;
+}
+
+export function formatAuditComparison(before, after, comparison) {
+  if (!comparison?.comparable) {
+    return 'Audit: comparison not available';
+  }
+
+  const beforeStr = formatAuditCounts(before);
+  const afterStr = formatAuditCounts(after);
+  const deltaStr = formatAuditDelta(comparison);
+
+  return `Before: ${beforeStr}\nAfter: ${afterStr}\n${deltaStr}`;
+}
+
+export function createAuditComparisonReport(before, after, comparison) {
+  return {
+    before: before?.counts || null,
+    after: after?.counts || null,
+    delta: comparison?.delta || null,
+    severityDeltas: comparison?.severityDeltas || null,
+    comparable: comparison?.comparable || false,
+    regressed: comparison?.regressed || false,
+    blocked: comparison?.blocked || false,
+    blockReason: comparison?.blockReason || ''
+  };
 }

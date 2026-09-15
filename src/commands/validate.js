@@ -7,12 +7,15 @@ import {
   makeRunContext
 } from '../core/activityLogger.js';
 import { commandExists, runCommand } from '../core/executor.js';
-import { getOriginUrl } from '../core/git.js';
+import { getOriginUrl, getGitUserConfig } from '../core/git.js';
 import {
   inspectNpmLocalPackage,
   parseLocalPackageArguments
 } from '../core/localPackages.js';
 import { error, info, line, success, warn } from '../ui/logger.js';
+
+const RECOMMENDED_NPM_VERSION = '11.19.1';
+const NPM_ARBORIST_BUG_VERSIONS = /^10\.|^11\.([0-9]|1[0-8])\./;
 
 function firstToken(commandString) {
   if (typeof commandString !== 'string' || commandString.trim().length === 0) {
@@ -47,6 +50,22 @@ function commandList(value) {
   return value.filter((entry) => typeof entry === 'string' && entry.trim().length > 0);
 }
 
+async function checkNpmVersion() {
+  const result = await runCommand('npm --version', {
+    allowFailure: true,
+    quiet: true
+  });
+
+  if (!result.success) {
+    return { available: false, version: '', needsUpgrade: false };
+  }
+
+  const version = result.stdout.trim();
+  const needsUpgrade = NPM_ARBORIST_BUG_VERSIONS.test(version);
+
+  return { available: true, version, needsUpgrade };
+}
+
 export async function validateCommand({
   cwd = process.cwd(),
   offline = false,
@@ -60,6 +79,8 @@ export async function validateCommand({
   const issues = [];
   const notices = [];
   let resolvedLocalPackages = [];
+  let gitUserConfig = null;
+  let npmVersionInfo = null;
 
   try {
     ({ config } = await loadConfig(cwd));
@@ -73,10 +94,35 @@ export async function validateCommand({
 
     if (!(await commandExists('git'))) {
       issues.push('git is not available in PATH');
+    } else {
+      gitUserConfig = await getGitUserConfig(cwd);
+
+      if (!gitUserConfig.hasUserName) {
+        issues.push(
+          'git user.name is not configured. Run `git config user.name "Your Name"` before patching.'
+        );
+      }
+
+      if (!gitUserConfig.hasUserEmail) {
+        issues.push(
+          'git user.email is not configured. Run `git config user.email "you@example.com"` before patching.'
+        );
+      }
     }
 
     if (managerBinary && !(await commandExists(managerBinary))) {
       issues.push(`${managerBinary} is not available in PATH`);
+    }
+
+    if (config.packageManager === 'npm') {
+      npmVersionInfo = await checkNpmVersion();
+
+      if (npmVersionInfo.needsUpgrade) {
+        notices.push(
+          `npm ${npmVersionInfo.version} may have Arborist issues with some peer dependency graphs. ` +
+          `Consider using npm@${RECOMMENDED_NPM_VERSION} or later, or add \`"updateCommand": "npx --yes npm@${RECOMMENDED_NPM_VERSION} update"\` to your config.`
+        );
+      }
     }
 
     await ensureBinary(config.installCommand, 'installCommand', issues);
@@ -143,8 +189,9 @@ export async function validateCommand({
 
     if (config.pullRequest?.enabled !== false) {
       if (!(await commandExists('gh'))) {
-        notices.push(
-          'GitHub CLI is not installed. Bridge can push a branch, but cannot create a pull request until gh is available.'
+        issues.push(
+          'GitHub CLI (gh) is not installed. PR creation is enabled but requires gh. ' +
+          'Install gh or set "pullRequest": { "enabled": false } in your config.'
         );
       } else {
         const ghAuth = await runCommand('gh auth status', {
@@ -154,7 +201,7 @@ export async function validateCommand({
 
         if (!ghAuth.success) {
           notices.push(
-            'GitHub CLI is not authenticated. Bridge will reuse an existing gh session or GH_TOKEN/GITHUB_TOKEN to create pull requests.'
+            'GitHub CLI is not authenticated. Run `gh auth login` or set GH_TOKEN/GITHUB_TOKEN environment variable.'
           );
         }
       }
@@ -197,6 +244,18 @@ export async function validateCommand({
   success('Config is valid.');
   success('Required commands are available.');
 
+  if (gitUserConfig?.isConfigured) {
+    success(`Git identity: ${gitUserConfig.userName} <${gitUserConfig.userEmail}>`);
+  }
+
+  if (npmVersionInfo?.available) {
+    if (npmVersionInfo.needsUpgrade) {
+      warn(`npm version: ${npmVersionInfo.version} (upgrade recommended)`);
+    } else {
+      success(`npm version: ${npmVersionInfo.version}`);
+    }
+  }
+
   for (const localPackage of resolvedLocalPackages) {
     success(
       `Local package ready: ${localPackage.name}@${localPackage.version || 'unknown'} (${localPackage.realPath})`
@@ -216,6 +275,12 @@ export async function validateCommand({
   await logRunEnd(run, 'passed', {
     offline,
     notices,
+    gitUserConfig: gitUserConfig ? {
+      userName: gitUserConfig.userName,
+      userEmail: gitUserConfig.userEmail,
+      isConfigured: gitUserConfig.isConfigured
+    } : null,
+    npmVersion: npmVersionInfo?.version || null,
     localPackages: resolvedLocalPackages.map((entry) => ({
       name: entry.name,
       version: entry.version
