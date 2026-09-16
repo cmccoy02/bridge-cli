@@ -280,6 +280,75 @@ function collectArtifactPaths(events = [], failurePath = '') {
   return [...artifacts];
 }
 
+function getEnvironmentInfo() {
+  return {
+    nodeVersion: process.version,
+    npmVersion: process.env.npm_config_user_agent
+      ? process.env.npm_config_user_agent.split(' ')[0]?.split('/')[1] || null
+      : null,
+    platform: process.platform,
+    arch: process.arch
+  };
+}
+
+function summarizeValidation(results = []) {
+  return results
+    .filter(Boolean)
+    .map((entry) => ({
+      scope: entry.label || 'root',
+      scriptDiff: entry.scriptDiff || null,
+      hasNewFailures: entry.comparison?.hasNewFailures || false,
+      hasBaselineNoise: entry.comparison?.hasBaselineNoise || false,
+      newFailureCount: entry.comparison?.newFailureCount || 0,
+      baselineFailureCount: entry.comparison?.baselineFailureCount || 0,
+      resolvedCount: entry.comparison?.resolvedCount || 0
+    }));
+}
+
+function collectGateDecisions(auditResults, validationResults) {
+  const decisions = [];
+
+  for (const audit of auditResults || []) {
+    if (audit?.comparison?.blocked) {
+      decisions.push({
+        gate: 'audit',
+        scope: audit.label || 'root',
+        passed: false,
+        reason: audit.comparison.blockReason
+      });
+    } else if (audit?.comparison?.comparable) {
+      decisions.push({
+        gate: 'audit',
+        scope: audit.label || 'root',
+        passed: true,
+        reason: 'No blocking severity increases'
+      });
+    }
+  }
+
+  for (const validation of validationResults || []) {
+    if (validation?.comparison?.hasNewFailures) {
+      decisions.push({
+        gate: 'validation',
+        scope: validation.label || 'root',
+        passed: false,
+        reason: `${validation.comparison.newFailureCount} new script failure(s)`
+      });
+    } else {
+      decisions.push({
+        gate: 'validation',
+        scope: validation.label || 'root',
+        passed: true,
+        reason: validation.comparison?.hasBaselineNoise
+          ? 'Only baseline failures (unchanged)'
+          : 'All scripts passed'
+      });
+    }
+  }
+
+  return decisions;
+}
+
 export async function writeRunReport({
   run,
   status,
@@ -294,6 +363,7 @@ export async function writeRunReport({
   dependencySummary = null,
   auditResults = [],
   bundleResults = [],
+  validationResults = [],
   localPackages = [],
   pullRequest = null,
   failure = null,
@@ -310,6 +380,9 @@ export async function writeRunReport({
     auditResults.length > 0 ? summarizeAudits(auditResults) : auditsFromEvents(events);
   const resolvedBundles =
     bundleResults.length > 0 ? summarizeBundles(bundleResults) : bundlesFromEvents(events);
+  const resolvedValidation = summarizeValidation(validationResults);
+  const gateDecisions = collectGateDecisions(auditResults, validationResults);
+
   const report = redactActivityPayload({
     schemaVersion: RUN_REPORT_SCHEMA_VERSION,
     generatedAt: new Date().toISOString(),
@@ -321,6 +394,7 @@ export async function writeRunReport({
       finishedAt: finishedEvent?.at || new Date().toISOString(),
       durationMs: Date.now() - run.startedAtMs
     },
+    environment: getEnvironmentInfo(),
     target: {
       repository: repo,
       configPath,
@@ -342,6 +416,8 @@ export async function writeRunReport({
       dependencySummary: resolvedDependencySummary,
       audits: resolvedAudits,
       bundles: resolvedBundles,
+      validation: resolvedValidation,
+      gateDecisions,
       pullRequest,
       failure: commandFailureDetails(failure)
     },

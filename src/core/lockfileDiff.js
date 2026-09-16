@@ -877,3 +877,82 @@ export function mergeDepDeltaSummaries(base, next) {
 export function createDepDeltaSummary() {
   return createEmptySummary();
 }
+
+export const TRANSITIVE_MAJOR_POLICIES = ['block', 'warn', 'allow'];
+export const DEFAULT_TRANSITIVE_MAJOR_POLICY = 'warn';
+
+export function getTransitiveMajorUpdates(deltas) {
+  if (!Array.isArray(deltas)) {
+    return [];
+  }
+
+  return deltas.filter(
+    (delta) => delta.kind === 'transitive' && delta.bump === 'major'
+  );
+}
+
+export function checkTransitiveMajorPolicy(deltas, policy = DEFAULT_TRANSITIVE_MAJOR_POLICY) {
+  const transitiveMajors = getTransitiveMajorUpdates(deltas);
+  const normalizedPolicy = TRANSITIVE_MAJOR_POLICIES.includes(policy)
+    ? policy
+    : DEFAULT_TRANSITIVE_MAJOR_POLICY;
+
+  if (transitiveMajors.length === 0) {
+    return {
+      policy: normalizedPolicy,
+      transitiveMajorCount: 0,
+      shouldBlock: false,
+      shouldWarn: false,
+      packages: [],
+      message: ''
+    };
+  }
+
+  const packages = transitiveMajors.slice(0, 10).map((delta) => ({
+    name: delta.name,
+    from: delta.from,
+    to: delta.to,
+    dependencyPath: delta.dependencyPath || null
+  }));
+
+  const examples = packages
+    .slice(0, 5)
+    .map((pkg) => `${pkg.name} ${pkg.from} -> ${pkg.to}`)
+    .join(', ');
+
+  const moreText =
+    transitiveMajors.length > 5
+      ? ` (+${transitiveMajors.length - 5} more)`
+      : '';
+
+  const shouldBlock = normalizedPolicy === 'block';
+  const shouldWarn = normalizedPolicy === 'warn';
+  const message = shouldBlock
+    ? `Transitive major updates are blocked: ${examples}${moreText}`
+    : shouldWarn
+      ? `Transitive major updates detected (warning): ${examples}${moreText}`
+      : '';
+
+  return {
+    policy: normalizedPolicy,
+    transitiveMajorCount: transitiveMajors.length,
+    shouldBlock,
+    shouldWarn,
+    packages,
+    message
+  };
+}
+
+export function formatTransitiveMajorSummary(result) {
+  if (!result || result.transitiveMajorCount === 0) {
+    return 'Transitive majors: none detected';
+  }
+
+  const status = result.shouldBlock
+    ? 'BLOCKED'
+    : result.shouldWarn
+      ? 'WARNING'
+      : 'allowed';
+
+  return `Transitive majors: ${result.transitiveMajorCount} detected [${status}]`;
+}

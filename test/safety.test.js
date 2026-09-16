@@ -150,12 +150,28 @@ test('pushBridgeBranch aborts when current branch is the default branch', async 
   assert.equal(remoteBranch.stdout.trim(), '');
 });
 
-test('cleanupLocalConfigAfterSuccessfulPush removes an untracked first-init config', async (t) => {
+test('cleanupLocalConfigAfterSuccessfulPush keeps untracked config by default (P0 retention)', async (t) => {
   const repoDir = await createLocalRepo(t);
   const configPath = path.join(repoDir, 'bridge.config.json');
 
   await fs.writeFile(configPath, '{"packageManager":"npm"}\n', 'utf8');
   const result = await cleanupLocalConfigAfterSuccessfulPush(repoDir, 'bridge.config.json');
+
+  assert.equal(result.removed, false);
+  assert.equal(result.reason, 'policy_keep');
+  assert.equal(await pathExists(configPath), true);
+});
+
+test('cleanupLocalConfigAfterSuccessfulPush removes untracked config with delete policy', async (t) => {
+  const repoDir = await createLocalRepo(t);
+  const configPath = path.join(repoDir, 'bridge.config.json');
+
+  await fs.writeFile(configPath, '{"packageManager":"npm"}\n', 'utf8');
+  const result = await cleanupLocalConfigAfterSuccessfulPush(
+    repoDir,
+    'bridge.config.json',
+    { retentionPolicy: 'delete' }
+  );
 
   assert.equal(result.removed, true);
   assert.equal(await pathExists(configPath), false);
