@@ -41,19 +41,128 @@ export function getGitHubRepository(remoteUrl) {
   return `${match[1]}/${match[2]}`;
 }
 
-function defaultBody({ branchName, baseBranch, dependencySummary }) {
+function formatSeverityDelta(delta) {
+  if (!delta) {
+    return '';
+  }
+
+  const parts = [];
+  const severities = ['critical', 'high', 'moderate', 'low'];
+
+  for (const severity of severities) {
+    const change = delta[severity];
+    if (change !== 0) {
+      const sign = change > 0 ? '+' : '';
+      parts.push(`${severity}: ${sign}${change}`);
+    }
+  }
+
+  return parts.length > 0 ? parts.join(', ') : 'no change';
+}
+
+function formatBumpSummary(byBump) {
+  if (!byBump) {
+    return '';
+  }
+
+  const parts = [];
+  if (byBump.patch > 0) parts.push(`${byBump.patch} patch`);
+  if (byBump.minor > 0) parts.push(`${byBump.minor} minor`);
+  if (byBump.major > 0) parts.push(`${byBump.major} major`);
+  if (byBump.other > 0) parts.push(`${byBump.other} other`);
+
+  return parts.length > 0 ? parts.join(', ') : 'none';
+}
+
+function defaultBody({
+  branchName,
+  baseBranch,
+  dependencySummary,
+  auditResults,
+  validationResults,
+  runReportPath
+}) {
   const direct = Number(dependencySummary?.directChanged) || 0;
   const transitive = Number(dependencySummary?.transitiveChanged) || 0;
+  const byBump = dependencySummary?.byBump;
 
-  return [
+  const lines = [
     '## Bridge dependency maintenance',
     '',
-    `- Base branch: \`${baseBranch}\``,
-    `- Candidate branch: \`${branchName}\``,
-    `- Dependency changes: ${direct} direct, ${transitive} transitive`,
+    '### Summary',
+    '',
+    `- **Base branch:** \`${baseBranch}\``,
+    `- **Candidate branch:** \`${branchName}\``,
+    `- **Dependency changes:** ${direct} direct, ${transitive} transitive`
+  ];
+
+  if (byBump) {
+    lines.push(`- **Update types:** ${formatBumpSummary(byBump)}`);
+  }
+
+  if (Array.isArray(auditResults) && auditResults.length > 0) {
+    lines.push('', '### Security audit');
+
+    for (const audit of auditResults) {
+      if (!audit?.comparison?.comparable) {
+        continue;
+      }
+
+      const { before, after, comparison } = audit;
+      const scopeLabel = audit.label || 'root';
+      const totalBefore = before?.counts?.total ?? '?';
+      const totalAfter = after?.counts?.total ?? '?';
+      const severityDelta = formatSeverityDelta(comparison.delta);
+
+      lines.push(`- **${scopeLabel}:** ${totalBefore} → ${totalAfter} vulnerabilities (${severityDelta})`);
+
+      if (comparison.blocked) {
+        lines.push(`  - ⚠️ ${comparison.blockReason}`);
+      }
+    }
+  }
+
+  if (Array.isArray(validationResults) && validationResults.length > 0) {
+    const hasScriptInfo = validationResults.some((v) => v?.scriptDiff?.diff);
+
+    if (hasScriptInfo) {
+      lines.push('', '### Validation scripts');
+
+      for (const validation of validationResults) {
+        if (!validation?.scriptDiff?.diff) {
+          continue;
+        }
+
+        const { scriptDiff, comparison } = validation;
+        const scopeLabel = validation.label || 'root';
+
+        if (comparison?.hasNewFailures) {
+          lines.push(`- **${scopeLabel}:** ❌ ${comparison.newFailureCount} new failure(s)`);
+        } else if (comparison?.hasBaselineNoise) {
+          lines.push(`- **${scopeLabel}:** ⚠️ ${comparison.baselineFailureCount} baseline failure(s) (unchanged)`);
+        } else {
+          lines.push(`- **${scopeLabel}:** ✅ all scripts passed`);
+        }
+
+        if (comparison?.resolvedCount > 0) {
+          lines.push(`  - ${comparison.resolvedCount} previously failing script(s) now pass`);
+        }
+      }
+    }
+  }
+
+  lines.push(
+    '',
+    '### Review',
     '',
     'Bridge ran the repository-configured validation checks before and after the update. Please review the diff and CI before merging.'
-  ].join('\n');
+  );
+
+  if (runReportPath) {
+    lines.push('', `> Report: \`${runReportPath}\``);
+  }
+
+  return lines.join('\n');
 }
 
 export async function createPullRequest({
@@ -62,6 +171,9 @@ export async function createPullRequest({
   baseBranch,
   repoUrl,
   dependencySummary,
+  auditResults = [],
+  validationResults = [],
+  runReportPath = '',
   options,
   commandExistsFn = commandExists,
   runCommandFn = runCommand
@@ -96,7 +208,14 @@ export async function createPullRequest({
   }
 
   const title = config.title || 'bridge: update dependencies (non-breaking)';
-  const body = config.body || defaultBody({ branchName, baseBranch, dependencySummary });
+  const body = config.body || defaultBody({
+    branchName,
+    baseBranch,
+    dependencySummary,
+    auditResults,
+    validationResults,
+    runReportPath
+  });
   const repository = getGitHubRepository(repoUrl);
   const command = [
     'gh pr create',

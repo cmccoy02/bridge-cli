@@ -380,3 +380,29 @@ export function inferRepoName(repoUrl) {
   const parts = normalized.split(/[/:]/).filter(Boolean);
   return parts.at(-1) || 'repository';
 }
+
+export async function getGitUserConfig(cwd) {
+  const git = getGit(cwd);
+  let userName = '';
+  let userEmail = '';
+
+  try {
+    userName = (await git.raw(['config', 'user.name'])).trim();
+  } catch {
+    userName = '';
+  }
+
+  try {
+    userEmail = (await git.raw(['config', 'user.email'])).trim();
+  } catch {
+    userEmail = '';
+  }
+
+  return {
+    userName,
+    userEmail,
+    hasUserName: userName.length > 0,
+    hasUserEmail: userEmail.length > 0,
+    isConfigured: userName.length > 0 && userEmail.length > 0
+  };
+}
