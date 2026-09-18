@@ -204,9 +204,7 @@ File: `bridge.config.json` (or `.bridge.config.json`)
     "metric": "brotli",
     "maxIncreasePercent": 5
   },
-  "branchPrefix": "bridge/patch",
-  "defaultBranch": "main",
-  "protectedBranches": ["main"]
+  "branchPrefix": "bridge/patch"
 }
 ```
 
@@ -218,7 +216,6 @@ Required fields:
 
 Optional fields:
 - `name`
-- `repoUrl` (if omitted, Bridge uses `origin` from git)
 - `beforeScripts`
 - `afterScripts`
 - `auditCommand` (npm defaults to `npm audit --package-lock-only --json`)
@@ -230,13 +227,22 @@ Optional fields:
 - `pullRequest` (defaults to enabled; optional `{ "draft": true, "title": "...", "body": "..." }`)
 - `bundleAnalysis` (optional `rollup-plugin-visualizer` adapter and before/after comparison)
 - `branchPrefix` (defaults to `bridge/patch`)
-- `defaultBranch` (if omitted, Bridge detects `origin`'s default branch and records it in the PR branch)
-- `protectedBranches` (additional branch names Bridge must never push to)
 - `scopes` (additional nested directories to patch in the same run)
 - `pythonZeroMajor` (how the Python requirements updater treats `0.x` pins): `"skip"` (default) leaves them byte-identical; `"patch"` keeps major+minor and updates the patch; `"minor"` allows minor updates while keeping major zero.
 
+### Git-derived settings (deprecated in config)
+
+The following fields are now derived from git and do not need to be specified in config:
+
+- `repoUrl` — derived from `git remote get-url origin`
+- `defaultBranch` — derived from `refs/remotes/origin/HEAD` or `git remote show origin`
+- `protectedBranches` — Bridge only opens PRs and never pushes directly to protected branches
+
+If these fields are present in legacy configs, Bridge treats them as optional overrides but prefers the git-derived values. You can safely remove these fields from your config.
+
 Notes:
-- If `bridge.config.json` is not tracked yet, Bridge will include it in the patch commit automatically. The local untracked copy is kept by default for weekly automation (see `configRetentionPolicy`).
+- **Config immutability**: `bridge.config.json` is treated as user-owned and immutable during a patch run. Bridge will not rewrite, expand, or merge inferred fields back onto disk.
+- **Untracked config not committed**: If `bridge.config.json` is untracked, Bridge will NOT include it in patch commits. The local untracked copy is kept by default for weekly automation (see `configRetentionPolicy`).
 - If `bridge.config.json` is already tracked, Bridge leaves your local copy in place.
 - Visualizer HTML reports are copied to `~/.bridge/artifacts/<run-id>/<scope>/` and are not added to the patch.
 - `beforeScripts` execute against the freshly installed baseline. `afterScripts` execute after the candidate is installed. Only NEW script failures block the patch; baseline failures are logged as warnings.
@@ -247,6 +253,21 @@ Notes:
 ### P0 reliability features
 
 These features were added to make `bridge patch` hands-off enough for weekly automation:
+
+#### Early exit on no updates
+
+If the update step finds no dependency changes across all scopes, Bridge exits early with a clear "No dependencies to update" message instead of running the full clean/reinstall/reset path. This saves time and avoids unnecessary noise when dependencies are already current.
+
+#### Branch naming with timestamps
+
+Branch names now include a time component for uniqueness: `bridge/patch-YYYY-MM-DD-HHMM` (e.g., `bridge/patch-2026-09-18-0930`). This prevents collisions when running Bridge multiple times on the same day (morning/evening runs).
+
+#### Config immutability
+
+`bridge.config.json` is treated as user-owned and immutable during a patch run:
+- Bridge will not auto-add optional defaults or merge inferred fields back onto disk
+- Untracked config files are not staged into patch commits
+- The config file's contents are preserved exactly as written
 
 #### Before/after script diff
 

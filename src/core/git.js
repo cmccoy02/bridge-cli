@@ -200,7 +200,7 @@ async function resolveDefaultBaseBranch(git, configuredDefaultBranch) {
   }
 
   throw new Error(
-    'Could not determine origin default branch. Add "defaultBranch": "main" (or "master") to bridge.config.json, or run `git remote set-head origin -a` in the repository and try again.'
+    'Could not determine origin default branch. Run `git remote set-head origin -a` in the repository to set up tracking, or add "defaultBranch": "main" (or "master") to bridge.config.json as a fallback.'
   );
 }
 
@@ -404,5 +404,24 @@ export async function getGitUserConfig(cwd) {
     hasUserName: userName.length > 0,
     hasUserEmail: userEmail.length > 0,
     isConfigured: userName.length > 0 && userEmail.length > 0
+  };
+}
+
+export async function getGitRepoIdentity(cwd) {
+  const git = getGit(cwd);
+  const originUrl = await getOriginUrl(cwd);
+  let defaultBranch = '';
+
+  try {
+    defaultBranch = await detectRemoteDefaultBranch(git);
+  } catch {
+    defaultBranch = '';
+  }
+
+  return {
+    originUrl,
+    defaultBranch,
+    hasOriginUrl: originUrl.length > 0,
+    hasDefaultBranch: defaultBranch.length > 0
   };
 }

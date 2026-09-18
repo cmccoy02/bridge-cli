@@ -20,9 +20,5 @@
     "maxIncreasePercent": 5
   },
   "branchPrefix": "bridge/patch",
-  "defaultBranch": "main",
-  "protectedBranches": [
-    "main"
-  ],
   "pythonZeroMajor": "skip"
 }
