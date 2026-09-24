@@ -374,10 +374,12 @@ export function normalizeConfig(config) {
     ? config.scopes.map((scope) => normalizeScope(scope)).filter(Boolean)
     : [];
 
-  return {
-    ...config,
+  // Extract git-derived fields that we'll handle separately
+  const { repoUrl, defaultBranch, protectedBranches, ...restConfig } = config;
+
+  const normalized = {
+    ...restConfig,
     name: typeof config.name === 'string' ? config.name.trim() : '',
-    repoUrl: typeof config.repoUrl === 'string' ? config.repoUrl.trim() : '',
     packageManager:
       typeof config.packageManager === 'string' ? config.packageManager.trim() : '',
     installCommand:
@@ -402,15 +404,26 @@ export function normalizeConfig(config) {
       typeof config.branchPrefix === 'string' && config.branchPrefix.trim()
         ? config.branchPrefix.trim()
         : DEFAULT_BRANCH_PREFIX,
-    defaultBranch:
-      typeof config.defaultBranch === 'string' ? config.defaultBranch.trim() : '',
-    protectedBranches: normalizeArray(config.protectedBranches),
     // 0.x handling is deferred: skip pre-1.0 pins by default so Bridge never opens
     // a `0.*` wildcard. `minor`/`patch` stay selectable for when 0.x lands.
     pythonZeroMajor: ['minor', 'patch', 'skip'].includes(config.pythonZeroMajor)
       ? config.pythonZeroMajor
       : 'skip'
   };
+
+  // Git-derived settings: only include if explicitly provided in config with non-empty values.
+  // These are optional overrides; Bridge derives them from git by default.
+  if (typeof repoUrl === 'string' && repoUrl.trim()) {
+    normalized.repoUrl = repoUrl.trim();
+  }
+  if (typeof defaultBranch === 'string' && defaultBranch.trim()) {
+    normalized.defaultBranch = defaultBranch.trim();
+  }
+  if (Array.isArray(protectedBranches) && protectedBranches.length > 0) {
+    normalized.protectedBranches = normalizeArray(protectedBranches);
+  }
+
+  return normalized;
 }
 
 export async function readConfigFile(cwd = process.cwd()) {

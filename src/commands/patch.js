@@ -96,7 +96,10 @@ function getDateStamp(date = new Date()) {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, '0');
   const day = String(date.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  // Include time component to distinguish same-day morning/evening runs
+  return `${year}-${month}-${day}-${hours}${minutes}`;
 }
 
 function sanitizeSegment(value) {
@@ -774,6 +777,26 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
     ? await readTextFileIfExists(lockfilePath)
     : null;
 
+  // Early detection: check if the update made any changes to the lockfile
+  const lockfileUnchanged = hasMetricTarget && 
+    baselineLockfileContent !== null && 
+    candidateLockfileContent !== null &&
+    baselineLockfileContent === candidateLockfileContent;
+
+  // For Python requirements-wildcard, check if there were any changes
+  const pythonNoChanges = updateResult.pythonRequirementsSummary && 
+    (updateResult.pythonRequirementsSummary.changes || []).length === 0;
+
+  const scopeHasNoUpdates = lockfileUnchanged || pythonNoChanges;
+
+  if (scopeHasNoUpdates) {
+    info(`${label}: No dependency updates found.`);
+    await logPhase(run, `early_exit:${label}`, 'info', {
+      scope: label,
+      reason: lockfileUnchanged ? 'lockfile_unchanged' : 'no_python_changes'
+    });
+  }
+
   await runPhase({
     run,
     phase: `reinstall:${label}`,
@@ -1056,6 +1079,7 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
 
   return {
     metricsSummary,
+    hasUpdates: !scopeHasNoUpdates,
     audit: {
       label,
       before: beforeAudit,
@@ -1090,17 +1114,10 @@ async function restoreLoadedConfig({ sourceConfigPath, tempConfigPath }) {
   return false;
 }
 
-async function ensureBridgeConfigIncluded(tempDir, configFileName, config) {
+async function shouldExcludeConfigFromStaging(tempDir, configFileName) {
   if (await isPathTracked(tempDir, configFileName)) {
     return false;
   }
-
-  const configPath = path.join(tempDir, configFileName);
-
-  if (!(await fileExists(configPath))) {
-    await writeConfigFile(configPath, config);
-  }
-
   return true;
 }
 
@@ -1224,6 +1241,7 @@ export async function patchCommand({
 
     const sourceConfigPath = path.join(cwd, configFileName);
     const copiedConfigPath = path.join(tempDir, configFileName);
+    // Git-derived settings: prefer git as source of truth, use config only as fallback
     const configuredDefaultBranch = config.defaultBranch || '';
     const protectedBranches = config.protectedBranches || [];
 
@@ -1246,14 +1264,6 @@ export async function patchCommand({
           sourceConfigPath,
           tempConfigPath: copiedConfigPath
         });
-
-        if (!configuredDefaultBranch && result.branch) {
-          config = {
-            ...config,
-            defaultBranch: result.branch
-          };
-          await writeConfigFile(copiedConfigPath, config);
-        }
 
         return result;
       }
@@ -1304,6 +1314,7 @@ export async function patchCommand({
     }
     info(`Update scopes: ${scopes.length}`);
 
+    let anyScopeHadUpdates = false;
     for (const scope of scopes) {
       const scopeResult = await runScopeWorkflow({
         run,
@@ -1319,6 +1330,17 @@ export async function patchCommand({
       auditResults.push(scopeResult.audit);
       bundleResults.push(scopeResult.bundle);
       validationResults.push(scopeResult.validation);
+      if (scopeResult.hasUpdates) {
+        anyScopeHadUpdates = true;
+      }
+    }
+
+    // Early exit if no scope had any dependency updates
+    if (!anyScopeHadUpdates && scopes.length > 0) {
+      success('No dependencies to update across all scopes.');
+      status = 'up_to_date';
+      await logRunEnd(run, 'up_to_date', { branchName, baseBranch, earlyExit: true });
+      return true;
     }
 
     await logDepDeltaSummary(run, {
@@ -1331,20 +1353,24 @@ export async function patchCommand({
       byBump: { ...depDeltaSummary.byBump }
     });
 
-    const gitPrepResult = await runPhase({
+    const excludeConfigFromStaging = await shouldExcludeConfigFromStaging(tempDir, configFileName);
+    
+    await runPhase({
       run,
       phase: 'prepare_git',
       spinnerText: 'Preparing git changes...',
       successText: 'Git changes prepared',
       task: async () => {
-        const addedConfig = await ensureBridgeConfigIncluded(tempDir, configFileName, config);
         await stageAll(tempDir);
-        return { addedConfig };
+        if (excludeConfigFromStaging) {
+          const configPath = path.join(tempDir, configFileName);
+          if (await fileExists(configPath)) {
+            await runCommand(`git reset HEAD -- ${configFileName}`, { cwd: tempDir, quiet: true });
+          }
+        }
+        return {};
       }
     });
-    if (gitPrepResult?.addedConfig) {
-      info(`Added ${configFileName} to patch branch because it was not tracked.`);
-    }
 
     if (!(await hasStagedChanges(tempDir))) {
       success('All dependencies are already up to date. Nothing to patch.');

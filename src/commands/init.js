@@ -175,11 +175,8 @@ export async function initCommand({ cwd = process.cwd() } = {}) {
       };
     }
 
-    const detectedRepoUrl = (detected.repoUrl || '').trim();
-
-    if (detectedRepoUrl) {
-      config.repoUrl = detectedRepoUrl;
-    }
+    // Note: repoUrl, defaultBranch, and protectedBranches are now derived from git
+    // at runtime and are not added to the config file by default.
 
     line('Config preview:');
     line(formatConfig(config));
