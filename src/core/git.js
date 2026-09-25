@@ -51,6 +51,10 @@ export async function cloneRepository(repoUrl, destination) {
   await git.clone(repoUrl, destination, ['--depth', '1']);
 }
 
+export async function getCurrentHeadSha(cwd) {
+  return getHeadSha(getGit(cwd));
+}
+
 export async function createBranch(cwd, branchName) {
   await getGit(cwd).checkoutLocalBranch(branchName);
 }
