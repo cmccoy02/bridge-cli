@@ -26,7 +26,7 @@ async function git(cwd, args, options = {}) {
 }
 
 async function makeTempDir(t) {
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-marcus-'));
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-test-'));
 
   t.after(async () => {
     await fs.rm(tempDir, { recursive: true, force: true });
