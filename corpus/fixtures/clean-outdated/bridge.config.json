@@ -1,0 +1,13 @@
+{
+  "name": "corpus-clean-outdated",
+  "packageManager": "npm",
+  "installCommand": "npm ci",
+  "updateCommand": "npm update",
+  "cleanCommands": ["rm -rf node_modules"],
+  "beforeScripts": ["npm run lint"],
+  "afterScripts": ["npm run lint", "npm run test"],
+  "allowMajorUpdates": false,
+  "pullRequest": {
+    "enabled": false
+  }
+}

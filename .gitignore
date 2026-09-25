@@ -6,3 +6,7 @@ yarn-error.log*
 pnpm-debug.log*
 *.test
 *.out
+
+# Corpus artifacts and generated state (not tracked)
+corpus/artifacts/
+corpus/fixtures/.remotes/

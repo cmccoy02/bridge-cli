@@ -1,0 +1,13 @@
+{
+  "name": "corpus-up-to-date",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Fixture: deps are already up-to-date, should early-exit",
+  "scripts": {
+    "lint": "exit 0",
+    "test": "exit 0"
+  },
+  "dependencies": {
+    "ms": "^2.1.3"
+  }
+}
