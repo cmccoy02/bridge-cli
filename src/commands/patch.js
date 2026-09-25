@@ -30,6 +30,8 @@ import {
   captureScriptResults,
   compareScriptResults,
   createScriptDiffReport,
+  evaluateScriptValidationGate,
+  formatBeforeScriptsBaselineNotice,
   formatScriptDiffSummary
 } from '../core/scriptDiff.js';
 import {
@@ -549,6 +551,8 @@ async function runVisualizer({
   return result;
 }
 
+// Lifecycle: baseline lockfile + install → beforeScripts → update/candidate
+// install → afterScripts → gate (NEW failures only). See SCOPE_WORKFLOW_PHASE_ORDER.
 async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false }) {
   const relativePath = normalizeScopePath(scope.path);
   const label = scopeLabel(relativePath);
@@ -644,8 +648,8 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
 
   await runCommandList({
     run,
-    phase: `clean:${label}`,
-    title: 'Running clean commands',
+    phase: `baseline_clean:${label}`,
+    title: 'Establishing baseline environment',
     commands: scope.cleanCommands,
     cwd: scopeDir,
     allowFailure: false,
@@ -663,9 +667,9 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
 
   const installResult = await runPhase({
     run,
-    phase: `install:${label}`,
-    spinnerText: `Running install command (${label})...`,
-    successText: 'Fresh install complete',
+    phase: `baseline_install:${label}`,
+    spinnerText: `Installing committed baseline (${label})...`,
+    successText: 'Committed baseline installed',
     task: async () =>
       runCommand(scope.installCommand, {
         cwd: scopeDir,
@@ -677,9 +681,30 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
     line(normalizeCommandOutput(installResult.stdout, 220) || 'Install output: (no stdout)');
   }
 
+  if (hasMetricTarget && baselineLockfileContent !== null) {
+    const lockfileAfterBaselineInstall = await readTextFileIfExists(lockfilePath);
+
+    if (
+      lockfileAfterBaselineInstall !== null &&
+      lockfileAfterBaselineInstall !== baselineLockfileContent
+    ) {
+      await restoreLockfileSnapshot({
+        run,
+        phase: `baseline_lockfile:${label}`,
+        label,
+        lockfile,
+        lockfilePath,
+        content: baselineLockfileContent
+      });
+      info(
+        `Baseline install changed ${lockfile}; restored the committed lockfile so before-scripts and the update start from the committed tree.`
+      );
+    }
+  }
+
   const beforeValidation = await runValidationScripts(
     run,
-    `Running before-update validation (${label})...`,
+    `Running before-update validation on committed baseline (${label})...`,
     scope.beforeScripts,
     scopeDir,
     `beforeScripts:${label}`,
@@ -689,10 +714,7 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
   const beforeScriptResults = captureScriptResults(beforeValidation.results);
 
   if (beforeValidation.failures.length > 0) {
-    warn(
-      `Before-scripts baseline: ${beforeValidation.failures.length} failure(s) detected. ` +
-      `These will be treated as baseline noise if they persist after the update.`
-    );
+    warn(formatBeforeScriptsBaselineNotice(beforeValidation.failures.length));
   }
 
   const beforeBundle = await runVisualizer({
@@ -799,14 +821,14 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
 
   await runPhase({
     run,
-    phase: `reinstall:${label}`,
-    spinnerText: `Regenerating lockfile (${label})...`,
-    successText: 'Clean lockfile generated',
+    phase: `candidate_reinstall:${label}`,
+    spinnerText: `Installing candidate tree (${label})...`,
+    successText: 'Candidate tree installed',
     task: async () => {
       await runCommandList({
         run,
-        phase: `reinstall_clean:${label}`,
-        title: 'Reinstall clean commands',
+        phase: `candidate_clean:${label}`,
+        title: 'Preparing candidate environment',
         commands: scope.cleanCommands,
         cwd: scopeDir,
         allowFailure: false,
@@ -995,7 +1017,7 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
 
   const afterValidation = await runValidationScripts(
     run,
-    `Running after-update validation (${label})...`,
+    `Running after-update validation on candidate tree (${label})...`,
     scope.afterScripts,
     scopeDir,
     `afterScripts:${label}`,
@@ -1006,25 +1028,18 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
 
   const scriptComparison = compareScriptResults(beforeScriptResults, afterScriptResults);
   const scriptDiffReport = createScriptDiffReport(beforeScriptResults, afterScriptResults);
+  const scriptGate = evaluateScriptValidationGate(scriptComparison, { label });
 
-  if (scriptComparison.hasNewFailures) {
-    for (const newFailure of scriptComparison.newFailures) {
-      policyViolations.push(
-        `After-update validation failed in ${label}: ${newFailure.command} (NEW failure, exit code ${newFailure.exitCode}).`
-      );
+  if (scriptGate.shouldBlock) {
+    policyViolations.push(...scriptGate.blockingMessages);
+  }
+
+  for (const notice of scriptGate.notices) {
+    if (notice.includes('now pass after the update')) {
+      success(notice);
+    } else {
+      warn(notice);
     }
-  }
-
-  if (scriptComparison.hasBaselineNoise) {
-    warn(
-      `${label}: ${scriptComparison.baselineFailureCount} baseline script failure(s) persist (not blocking).`
-    );
-  }
-
-  if (scriptComparison.resolvedCount > 0) {
-    success(
-      `${label}: ${scriptComparison.resolvedCount} baseline script failure(s) resolved.`
-    );
   }
 
   await logPhase(run, `scriptDiff:${label}`, scriptComparison.hasNewFailures ? 'failed' : 'success', {
@@ -1602,6 +1617,9 @@ export async function patchCommand({
           const sign = comparison.deltaBytes > 0 ? '+' : '';
           return `Bundle ${entry.label}: ${sign}${formatBytes(comparison.deltaBytes)} (${sign}${comparison.deltaPercent.toFixed(2)}% ${comparison.metric})`;
         });
+      const scriptLines = validationResults
+        .filter((entry) => entry?.comparison)
+        .map((entry) => `${entry.label}: ${formatScriptDiffSummary(entry.comparison)}`);
 
       printSummary(
         [
@@ -1612,6 +1630,7 @@ export async function patchCommand({
           `Files changed: ${changedFilesCount}`,
           ...auditLines,
           ...bundleLines,
+          ...scriptLines,
           keepWorkspace
             ? `Workspace: ${tempDir}`
             : 'Isolated workspace cleaned.',
@@ -1621,10 +1640,15 @@ export async function patchCommand({
         'Bridge dry run'
       );
     } else if (status === 'failed') {
+      const scriptLines = validationResults
+        .filter((entry) => entry?.comparison)
+        .map((entry) => `${entry.label}: ${formatScriptDiffSummary(entry.comparison)}`);
+
       printSummary(
         [
-          'Bridge stopped before creating a branch or PR.',
+          'Bridge stopped before push/PR.',
           failure?.message ? `Reason: ${failure.message}` : 'Reason: unknown failure',
+          ...scriptLines,
           failurePath ? `Failure evidence: ${failurePath}` : '',
           runReportPath ? `Report: ${runReportPath}` : '',
           keepWorkspace ? `Workspace: ${tempDir}` : 'Isolated workspace cleaned.'
@@ -1647,6 +1671,9 @@ export async function patchCommand({
           const sign = comparison.deltaBytes > 0 ? '+' : '';
           return `Bundle ${entry.label}: ${sign}${formatBytes(comparison.deltaBytes)} (${sign}${comparison.deltaPercent.toFixed(2)}% ${comparison.metric})`;
         });
+      const scriptLines = validationResults
+        .filter((entry) => entry?.comparison)
+        .map((entry) => `${entry.label}: ${formatScriptDiffSummary(entry.comparison)}`);
 
       printSummary(
         [
@@ -1657,6 +1684,7 @@ export async function patchCommand({
           `Files changed: ${changedFilesCount}`,
           ...auditLines,
           ...bundleLines,
+          ...scriptLines,
           pullRequest?.url ? `Pull request: ${pullRequest.url}` : '',
           compareUrl ? `Compare: ${compareUrl}` : 'Compare URL unavailable.',
           ['created', 'existing'].includes(pullRequest?.status)
