@@ -168,13 +168,87 @@ Bridge also writes local operation logs to:
 
 Each `bridge patch` run additionally writes:
 
-- `~/.bridge/runs/<run-id>/bridge-report.v1.json`
+- `~/.bridge/runs/<run-id>/bridge-report.v1.json` — main run report with outcomes
+- `~/.bridge/runs/<run-id>/bridge-agent.v1.jsonl` — append-only event stream for agent consumption
 - `~/.bridge/runs/<run-id>/failure.log` when a command fails
 - `~/.bridge/artifacts/<run-id>/...` for Visualizer reports
 
 Set `BRIDGE_HOME` to store all of these local artifacts somewhere else. Reports
 are redacted before writing and are the stable data contract for a future Bridge
 Console.
+
+### Agent Telemetry (`bridge-agent.v1`)
+
+The `bridge-agent.v1.jsonl` file is an append-only event stream designed for
+AI agents and automation tools to recursively improve Bridge from real run data.
+Each line is a self-contained JSON event with:
+
+- `schemaVersion`: `"bridge-agent.v1"`
+- `runId`: unique run identifier
+- `timestamp`: ISO 8601 timestamp
+- `elapsedMs`: milliseconds since run start
+- `event`: event type (see below)
+
+**Event types:**
+
+| Event | Description |
+|-------|-------------|
+| `run_started` | Run begins; includes detailed environment info |
+| `phase_completed` | A phase finished; includes timing and status |
+| `early_exit` | Run exited early; includes reason code |
+| `gate_decision` | Audit/validation gate result; includes pass/fail |
+| `config_state` | Config file status at end; includes SHA256, staged, mutated |
+| `dependency_delta_summary` | Aggregated dependency change metrics |
+| `run_finished` | Run completed; includes final status and duration |
+
+**Extended report fields (in `bridge-report.v1.json`):**
+
+The main report now includes additional agent-friendly fields:
+
+```json
+{
+  "agentSchemaVersion": "bridge-agent.v1",
+  "git": {
+    "baseBranch": "main",
+    "branchName": "bridge/patch-2026-09-25-1430",
+    "baseSha": "abc123",
+    "headSha": "def456",
+    "stagedFiles": ["package.json", "package-lock.json"]
+  },
+  "config": {
+    "path": "/path/to/bridge.config.json",
+    "sha256": "e3b0c442...",
+    "staged": false,
+    "mutated": false
+  },
+  "outcome": {
+    "earlyExit": null,
+    "skippedCount": 0,
+    "blockedCount": 0
+  },
+  "phaseTiming": {
+    "commit": { "durationMs": 1234, "status": "success" },
+    "pr": { "durationMs": 567, "status": "success" }
+  },
+  "agentEventStream": "~/.bridge/runs/<run-id>/bridge-agent.v1.jsonl"
+}
+```
+
+**Early exit reason codes:**
+
+| Code | Description |
+|------|-------------|
+| `no_updates` | No dependency updates found across all scopes |
+| `up_to_date` | All dependencies already at latest versions |
+| `lockfile_unchanged` | Lockfile unchanged after update command |
+| `no_python_changes` | No Python requirement changes detected |
+| `policy_block` | Blocked by policy violation (major updates, etc.) |
+| `audit_block` | Blocked by security audit regression |
+| `bundle_block` | Blocked by bundle size regression |
+| `validation_block` | Blocked by validation script failure |
+
+These artifacts are designed for agents to understand why a run succeeded,
+failed, or exited early — enabling automated triage and self-improvement loops.
 
 ## Config Reference
 
