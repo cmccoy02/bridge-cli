@@ -95,8 +95,9 @@ Runs the patch engine end-to-end:
 - Delete local temp branches except the default branch
 - Create and check out the Bridge patch branch before updates run
 - Capture the pre-update vulnerability and Visualizer baselines
-- Clean/install/update/reinstall using config commands
-- Run blocking before/after validation scripts
+- Install the committed lockfile baseline, then run `beforeScripts`
+- Update dependencies and install the candidate tree, then run `afterScripts`
+- Diff before vs after: only NEW after-script failures block push/PR
 - Run the optional Visualizer metric last in each validation phase
 - Reject direct major-version changes, new vulnerabilities, and configured bundle regressions
 - Save a detailed, redacted `bridge-report.v1.json` for the run
@@ -245,7 +246,7 @@ Notes:
 - **Untracked config not committed**: If `bridge.config.json` is untracked, Bridge will NOT include it in patch commits. The local untracked copy is kept by default for weekly automation (see `configRetentionPolicy`).
 - If `bridge.config.json` is already tracked, Bridge leaves your local copy in place.
 - Visualizer HTML reports are copied to `~/.bridge/artifacts/<run-id>/<scope>/` and are not added to the patch.
-- `beforeScripts` execute against the freshly installed baseline. `afterScripts` execute after the candidate is installed. Only NEW script failures block the patch; baseline failures are logged as warnings.
+- `beforeScripts` execute against the committed-lockfile baseline after install-as-needed, and before any update/candidate mutation. `afterScripts` execute after the candidate is installed. Only NEW after-script failures block push/PR. Pre-existing baseline failures are reported as already-present and non-blocking.
 - When clean commands remove a supported lockfile, Bridge restores the committed baseline before the before scripts and restores the candidate lockfile before the after scripts. This prevents `npm install` from resolving an updated dependency tree on both sides of the comparison.
 - The Visualizer lives only in `bundleAnalysis`, not in `beforeScripts` or `afterScripts`. Bridge runs it after those arrays on both sides, so it is the last optional validation step rather than a duplicate build path.
 - `bridge patch` pushes only a protected-branch-guarded candidate branch after every gate passes. Use `--dry-run` for a non-mutating simulation.
@@ -271,13 +272,13 @@ Branch names now include a time component for uniqueness: `bridge/patch-YYYY-MM-
 
 #### Before/after script diff
 
-Bridge now captures baseline script results (exit codes and output) before the update and compares them with after-update results. Only NEW failures block the patch:
+Bridge now captures baseline script results (exit codes and output) before the update and compares them with after-update results. Only NEW failures block push/PR:
 
-- Baseline failures that persist are logged as warnings but do not block
+- Pre-existing baseline failures (already present before the update) are reported as non-blocking noise
 - Resolved failures (failures that now pass) are reported as improvements
-- New failures (scripts that fail only after the update) block the patch
+- NEW failures (scripts that fail only after the update) hard-stop before push/PR
 
-This prevents flaky or pre-existing lint/test failures from blocking otherwise-good patches.
+This prevents flaky or pre-existing lint/test failures from blocking otherwise-good patches, while making a candidate regression an obvious stop.
 
 #### Severity-aware audit gate
 
@@ -450,11 +451,11 @@ Bridge is intentionally simple and deterministic:
 1. Read `bridge.config.json`
 2. Copy repo into an isolated temp directory
 3. Fetch origin, check out/pull the default branch, and create a Bridge branch
-4. Install and validate a reproducible before-update baseline
-5. Run the optional Visualizer baseline after the configured before scripts
-6. Update and reinstall dependencies
-7. Run configured after scripts, then the optional Visualizer candidate build
-8. Compare dependency, vulnerability, bundle, and validation results
+4. Install a reproducible before-update baseline from the committed lockfile
+5. Run `beforeScripts` on that baseline, then the optional Visualizer baseline
+6. Update dependencies and install the candidate tree
+7. Run `afterScripts`, then the optional Visualizer candidate build
+8. Compare dependency, vulnerability, bundle, and validation results — NEW after-script failures stop before push/PR
 9. Write a redacted report and failure evidence for the local run
 10. Commit/push through the protected-branch guard, then create a PR when existing GitHub API credentials are available
 11. Cleanup temp directory and any first-init local config copy

@@ -84,6 +84,52 @@ test('pull request creation returns an existing PR after a retry', async () => {
   assert.match(commands[2], /--head 'bridge\/patch-2026-08-26'/);
 });
 
+test('pull request body distinguishes NEW failures from pre-existing baseline failures', async () => {
+  const commands = [];
+
+  await createPullRequest({
+    cwd: '/tmp/repo',
+    branchName: 'bridge/patch-2026-09-25',
+    baseBranch: 'main',
+    repoUrl: 'https://github.com/example/project.git',
+    dependencySummary: { directChanged: 1, transitiveChanged: 0 },
+    validationResults: [
+      {
+        label: 'root',
+        scriptDiff: { diff: { hasNewFailures: false, hasBaselineNoise: true } },
+        comparison: {
+          hasNewFailures: false,
+          hasBaselineNoise: true,
+          newFailureCount: 0,
+          baselineFailureCount: 1,
+          resolvedCount: 0
+        }
+      }
+    ],
+    commandExistsFn: async () => true,
+    runCommandFn: async (command) => {
+      commands.push(command);
+
+      if (command === 'gh auth status') {
+        return { success: true, stdout: '', stderr: '' };
+      }
+
+      return {
+        success: true,
+        stdout: 'https://github.com/example/project/pull/42\n',
+        stderr: ''
+      };
+    }
+  });
+
+  assert.match(
+    commands[1],
+    /pre-existing baseline failure\(s\) \(already present before the update; not blocking\)/
+  );
+  assert.doesNotMatch(commands[1], /persist \(not blocking\)/);
+  assert.doesNotMatch(commands[1], /baseline failure\(s\) \(unchanged\)/);
+});
+
 test('pull request creation does not require GitHub CLI to push a branch', async () => {
   const result = await createPullRequest({
     cwd: '/tmp/repo',

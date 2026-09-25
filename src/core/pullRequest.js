@@ -1,5 +1,6 @@
 import { commandExists, runCommand } from './executor.js';
 import { redactSensitiveText } from './redaction.js';
+import { formatValidationPrLine } from './scriptDiff.js';
 
 function shellQuote(value) {
   return `'${String(value ?? '').replace(/'/g, `"'"'`)}'`;
@@ -133,19 +134,15 @@ function defaultBody({
           continue;
         }
 
-        const { scriptDiff, comparison } = validation;
+        const { comparison } = validation;
         const scopeLabel = validation.label || 'root';
 
-        if (comparison?.hasNewFailures) {
-          lines.push(`- **${scopeLabel}:** ❌ ${comparison.newFailureCount} new failure(s)`);
-        } else if (comparison?.hasBaselineNoise) {
-          lines.push(`- **${scopeLabel}:** ⚠️ ${comparison.baselineFailureCount} baseline failure(s) (unchanged)`);
-        } else {
-          lines.push(`- **${scopeLabel}:** ✅ all scripts passed`);
-        }
+        lines.push(formatValidationPrLine(comparison, scopeLabel));
 
         if (comparison?.resolvedCount > 0) {
-          lines.push(`  - ${comparison.resolvedCount} previously failing script(s) now pass`);
+          lines.push(
+            `  - ${comparison.resolvedCount} pre-existing baseline failure(s) now pass`
+          );
         }
       }
     }
