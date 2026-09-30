@@ -1,4 +1,7 @@
 import simpleGit from 'simple-git';
+import path from 'node:path';
+
+import { DEPENDENCY_ARTIFACT_BASENAMES } from '../constants.js';
 
 function getGit(cwd) {
   return simpleGit({ baseDir: cwd });
@@ -65,6 +68,66 @@ export async function getCurrentBranch(cwd) {
 
 export async function stageAll(cwd) {
   await getGit(cwd).add(['-A']);
+}
+
+export function isDependencyArtifactPath(filePath) {
+  const normalized = String(filePath || '').replace(/\\/g, '/');
+  const base = path.posix.basename(normalized);
+  return DEPENDENCY_ARTIFACT_BASENAMES.has(base);
+}
+
+export async function stageDependencyChanges(cwd) {
+  const git = getGit(cwd);
+  const status = await git.status();
+  const seen = new Set();
+  const candidates = [];
+
+  const addCandidate = (file) => {
+    if (!file || seen.has(file)) {
+      return;
+    }
+
+    seen.add(file);
+    candidates.push(file);
+  };
+
+  for (const file of status.not_added || []) {
+    addCandidate(file);
+  }
+
+  for (const file of status.created || []) {
+    addCandidate(file);
+  }
+
+  for (const file of status.modified || []) {
+    addCandidate(file);
+  }
+
+  for (const file of status.deleted || []) {
+    addCandidate(file);
+  }
+
+  for (const entry of status.renamed || []) {
+    addCandidate(entry.from);
+    addCandidate(entry.to);
+  }
+
+  const staged = [];
+  const skipped = [];
+
+  for (const file of candidates) {
+    if (isDependencyArtifactPath(file)) {
+      staged.push(file);
+    } else {
+      skipped.push(file);
+    }
+  }
+
+  if (staged.length > 0) {
+    await git.add(staged);
+  }
+
+  return { staged, skipped };
 }
 
 export async function hasStagedChanges(cwd) {

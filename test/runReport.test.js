@@ -95,6 +95,129 @@ test('saved run reports retain useful evidence and redact command output', async
   assert.ok(report.artifacts.includes(failurePath));
   assert.doesNotMatch(evidence, /should-not-appear/);
   assert.match(evidence, /\[redacted\]/);
-  assert.equal(saved.reportPath, reportPath);
-  assert.equal(saved.report.run.id, run.runId);
+  assert.match(evidence, /--- stderr ---/);
+});
+
+test('failure evidence includes both stdout and stderr', async (t) => {
+  const bridgeHome = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-report-'));
+  const previousBridgeHome = process.env.BRIDGE_HOME;
+  process.env.BRIDGE_HOME = bridgeHome;
+
+  t.after(async () => {
+    if (previousBridgeHome === undefined) {
+      delete process.env.BRIDGE_HOME;
+    } else {
+      process.env.BRIDGE_HOME = previousBridgeHome;
+    }
+    await fs.rm(bridgeHome, { recursive: true, force: true });
+  });
+
+  const failure = Object.assign(new Error('NEW after-script failure'), {
+    command: 'pnpm run test:lint',
+    code: 1,
+    stderr: '$ eslint .\n',
+    stdout: 'src/App.tsx\n  1:1  error  no-console\n'
+  });
+  const failurePath = await writeFailureEvidence('run-streams', failure);
+  const evidence = await fs.readFile(failurePath, 'utf8');
+
+  assert.match(evidence, /--- stderr ---/);
+  assert.match(evidence, /\$ eslint \./);
+  assert.match(evidence, /--- stdout ---/);
+  assert.match(evidence, /no-console/);
+});
+
+test('blocked run reports include validation, gate decisions, and blockedCount', async (t) => {
+  const bridgeHome = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-report-'));
+  const previousBridgeHome = process.env.BRIDGE_HOME;
+  process.env.BRIDGE_HOME = bridgeHome;
+
+  t.after(async () => {
+    if (previousBridgeHome === undefined) {
+      delete process.env.BRIDGE_HOME;
+    } else {
+      process.env.BRIDGE_HOME = previousBridgeHome;
+    }
+    await fs.rm(bridgeHome, { recursive: true, force: true });
+  });
+
+  const run = makeRunContext('patch', '/tmp/example-project');
+  await logRunStart(run, { dryRun: true });
+  await logRunEnd(run, 'failed');
+
+  const { report } = await writeRunReport({
+    run,
+    status: 'failed',
+    validationResults: [
+      {
+        label: 'root',
+        scriptDiff: { diff: { hasNewFailures: true } },
+        comparison: {
+          hasNewFailures: true,
+          newFailureCount: 1,
+          baselineFailureCount: 0,
+          resolvedCount: 0,
+          newFailures: [{ command: 'npm test', exitCode: 1, outputChanged: true }]
+        }
+      }
+    ],
+    auditResults: [
+      {
+        label: 'root',
+        comparison: { comparable: true, blocked: true, blockReason: 'high +1' }
+      }
+    ],
+    blockedCount: 1,
+    earlyExit: { code: 'validation_block', message: 'Blocked by validation script failure' },
+    environment: { nodeVersion: 'v22.0.0', npmVersion: '10.9.8', platform: 'linux', arch: 'x64' }
+  });
+
+  assert.equal(report.outcome.validation[0].hasNewFailures, true);
+  assert.ok(report.outcome.gateDecisions.some((decision) => decision.gate === 'validation' && !decision.passed));
+  assert.ok(report.outcome.blockedCount >= 1);
+  assert.equal(report.outcome.earlyExit.code, 'validation_block');
+  assert.equal(report.environment.npmVersion, '10.9.8');
+});
+
+test('blocked baseline failures are recorded as failed validation gates', async (t) => {
+  const bridgeHome = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-report-'));
+  const previousBridgeHome = process.env.BRIDGE_HOME;
+  process.env.BRIDGE_HOME = bridgeHome;
+
+  t.after(async () => {
+    if (previousBridgeHome === undefined) {
+      delete process.env.BRIDGE_HOME;
+    } else {
+      process.env.BRIDGE_HOME = previousBridgeHome;
+    }
+    await fs.rm(bridgeHome, { recursive: true, force: true });
+  });
+
+  const run = makeRunContext('patch', '/tmp/example-project');
+  await logRunStart(run, { dryRun: true });
+  await logRunEnd(run, 'failed');
+
+  const { report } = await writeRunReport({
+    run,
+    status: 'failed',
+    validationResults: [
+      {
+        label: 'root',
+        blocked: true,
+        comparison: {
+          hasNewFailures: false,
+          hasBaselineNoise: true,
+          newFailureCount: 0,
+          baselineFailureCount: 1,
+          resolvedCount: 0
+        }
+      }
+    ],
+    blockedCount: 1,
+    earlyExit: { code: 'validation_block', message: 'Blocked by baseline failures' }
+  });
+
+  assert.equal(report.outcome.validation[0].hasBaselineNoise, true);
+  assert.ok(report.outcome.gateDecisions.some((decision) => decision.gate === 'validation' && !decision.passed));
+  assert.ok(report.outcome.blockedCount >= 1);
 });

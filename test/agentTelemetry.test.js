@@ -302,3 +302,11 @@ test('AgentEventStream emitConfigState records config status', async (t) => {
   assert.equal(event.configStaged, false);
   assert.equal(event.configMutated, false);
 });
+
+test('collectRuntimeEnvironment fills npmVersion from npm --version', async () => {
+  const { collectRuntimeEnvironment } = await import('../src/core/runtimeEnvironment.js');
+  const env = await collectRuntimeEnvironment('npm');
+  assert.ok(typeof env.npmVersion === 'string' && env.npmVersion.length > 0);
+  assert.equal(env.packageManager, 'npm');
+  assert.equal(env.packageManagerVersion, env.npmVersion);
+});

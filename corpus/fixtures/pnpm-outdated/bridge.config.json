@@ -1,0 +1,14 @@
+{
+  "name": "corpus-pnpm-outdated",
+  "packageManager": "pnpm",
+  "installCommand": "pnpm install",
+  "updateCommand": "pnpm update",
+  "cleanCommands": ["rm -rf node_modules"],
+  "beforeScripts": ["pnpm run lint", "pnpm run test"],
+  "afterScripts": ["pnpm run lint", "pnpm run test"],
+  "auditCommand": "pnpm audit --json",
+  "allowMajorUpdates": false,
+  "pullRequest": {
+    "enabled": false
+  }
+}

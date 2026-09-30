@@ -97,12 +97,15 @@ Runs the patch engine end-to-end:
 - Capture the pre-update vulnerability and Visualizer baselines
 - Install the committed lockfile baseline, then run `beforeScripts`
 - Update dependencies and install the candidate tree, then run `afterScripts`
-- Diff before vs after: only NEW after-script failures block push/PR
-- Run the optional Visualizer metric last in each validation phase
-- Reject direct major-version changes, new vulnerabilities, and configured bundle regressions
-- Save a detailed, redacted `bridge-report.v1.json` for the run
-- Save full redacted output when a command fails
+- Diff before vs after: only NEW after-script failures block push/PR, including new error output inside a command that already failed on the baseline
+- Hide untracked `bridge.config.json` from the isolated workspace so repo lint/format scripts do not fail on Bridge's own config
+- Stage only dependency manifests and lockfiles
+- Reject direct major-version changes, new vulnerabilities, and configured bundle regressions (npm, pnpm, and yarn lockfiles)
+- Save a detailed, redacted `bridge-report.v1.json` for the run, including blocked-run validation/gate evidence
+- Save full redacted stdout and stderr when a command fails
+- Exit before candidate reinstall/after-scripts when the lockfile did not change
 - Commit and push only through the protected-branch guard after every gate passes
+- Reuse or update an open Bridge PR with identical/same-file changes instead of opening a duplicate
 - Create a pull request through an existing GitHub CLI session when available
 - Print pull request/compare URLs and final summary
 - Always cleanup temp directory
@@ -115,6 +118,9 @@ bridge patch --dry-run
 
 # Stream underlying command output and preserve the isolated repo for debugging.
 bridge patch --dry-run --verbose --keep-workspace
+
+# Treat baseline script failures as blocking instead of noise.
+bridge patch --block-on-baseline-failures
 
 # Exercise one declared service without running every configured scope.
 bridge patch --dry-run --scope deploy/description_bot
@@ -268,6 +274,7 @@ File: `bridge.config.json` (or `.bridge.config.json`)
   "afterScripts": [],
   "auditCommand": "npm audit --package-lock-only --json",
   "blockOnNewVulnerabilities": true,
+  "blockOnBaselineFailures": false,
   "allowMajorUpdates": false,
   "pullRequest": {
     "enabled": true,
@@ -293,8 +300,9 @@ Optional fields:
 - `name`
 - `beforeScripts`
 - `afterScripts`
-- `auditCommand` (npm defaults to `npm audit --package-lock-only --json`)
+- `auditCommand` (npm defaults to `npm audit --package-lock-only --json`; pnpm to `pnpm audit --json`; yarn to `yarn audit --json`)
 - `blockOnNewVulnerabilities` (defaults to `true`)
+- `blockOnBaselineFailures` (defaults to `false`; when true, pre-existing baseline script failures also stop push/PR)
 - `auditBlockingSeverities` (defaults to `["critical", "high"]`; severity levels that block when increased)
 - `allowMajorUpdates` (defaults to `false`; applies to direct dependencies)
 - `transitiveMajorPolicy` (defaults to `"warn"`; options: `"block"`, `"warn"`, `"allow"`)
@@ -317,11 +325,13 @@ If these fields are present in legacy configs, Bridge treats them as optional ov
 
 Notes:
 - **Config immutability**: `bridge.config.json` is treated as user-owned and immutable during a patch run. Bridge will not rewrite, expand, or merge inferred fields back onto disk.
-- **Untracked config not committed**: If `bridge.config.json` is untracked, Bridge will NOT include it in patch commits. The local untracked copy is kept by default for weekly automation (see `configRetentionPolicy`).
+- **Untracked config not committed**: If `bridge.config.json` is untracked, Bridge isolates it out of the working tree (`.git/bridge/`) before validation so `eslint .` / `prettier --check .` see a clean repo. Patch commits only include dependency manifests and lockfiles.
 - If `bridge.config.json` is already tracked, Bridge leaves your local copy in place.
 - Visualizer HTML reports are copied to `~/.bridge/artifacts/<run-id>/<scope>/` and are not added to the patch.
-- `beforeScripts` execute against the committed-lockfile baseline after install-as-needed, and before any update/candidate mutation. `afterScripts` execute after the candidate is installed. Only NEW after-script failures block push/PR. Pre-existing baseline failures are reported as already-present and non-blocking.
+- `beforeScripts` execute against the committed-lockfile baseline after install-as-needed, and before any update/candidate mutation. `afterScripts` execute after the candidate is installed. Only NEW after-script failures block push/PR. That includes new error lines inside a command that already failed on the baseline. Pre-existing identical baseline failures are reported as already-present and non-blocking unless `blockOnBaselineFailures` is enabled. A command that appears only in `afterScripts` is described as not measured on the baseline, not as "introduced by the update".
 - When clean commands remove a supported lockfile, Bridge restores the committed baseline before the before scripts and restores the candidate lockfile before the after scripts. This prevents `npm install` from resolving an updated dependency tree on both sides of the comparison.
+- npm, pnpm, and yarn lockfiles are parsed for dependency deltas and the direct-major gate. `bridge doctor` warns when a lockfile format cannot be parsed or `auditCommand` is empty.
+- When a run is blocked, `failure.log` includes the failing command's stdout and stderr, the report records `validation` / `gateDecisions` / `blockedCount`, and the terminal prints a short excerpt of failing lines (both streams).
 - The Visualizer lives only in `bundleAnalysis`, not in `beforeScripts` or `afterScripts`. Bridge runs it after those arrays on both sides, so it is the last optional validation step rather than a duplicate build path.
 - `bridge patch` pushes only a protected-branch-guarded candidate branch after every gate passes. Use `--dry-run` for a non-mutating simulation.
 
@@ -331,7 +341,7 @@ These features were added to make `bridge patch` hands-off enough for weekly aut
 
 #### Early exit on no updates
 
-If the update step finds no dependency changes across all scopes, Bridge exits early with a clear "No dependencies to update" message instead of running the full clean/reinstall/reset path. This saves time and avoids unnecessary noise when dependencies are already current.
+If the update step finds no dependency changes across all scopes, Bridge exits before candidate reinstall, after-scripts, and Visualizer with a clear "No dependencies to update" message. The summary does not print a branch that was never created.
 
 #### Branch naming with timestamps
 
@@ -346,11 +356,13 @@ Branch names now include a time component for uniqueness: `bridge/patch-YYYY-MM-
 
 #### Before/after script diff
 
-Bridge now captures baseline script results (exit codes and output) before the update and compares them with after-update results. Only NEW failures block push/PR:
+Bridge now captures baseline script results (exit codes and normalized failure output) before the update and compares them with after-update results. Only NEW failures block push/PR:
 
-- Pre-existing baseline failures (already present before the update) are reported as non-blocking noise
+- Pre-existing baseline failures with the same normalized error set are reported as non-blocking noise
+- A command that still fails but gained new error lines is a NEW failure and hard-stops before push/PR
+- When output changed and Bridge cannot prove it is the same failure, it blocks (conservative)
 - Resolved failures (failures that now pass) are reported as improvements
-- NEW failures (scripts that fail only after the update) hard-stop before push/PR
+- `blockOnBaselineFailures: true` or `--block-on-baseline-failures` also stops on pre-existing baseline failures
 
 This prevents flaky or pre-existing lint/test failures from blocking otherwise-good patches, while making a candidate regression an obvious stop.
 
@@ -392,6 +404,9 @@ This catches cases like `@babel/runtime` going 7→8 via a direct dependency upd
 - Git `user.name` and `user.email` are configured (required for commits)
 - GitHub CLI (`gh`) is installed and authenticated when PR creation is enabled
 - npm version, with guidance if using a version with known Arborist bugs
+- Lockfile metrics / the direct-major gate are inactive because the lockfile format cannot be parsed
+- `auditCommand` is empty, which disables the vulnerability gate
+- `afterScripts` includes commands that were never measured on the baseline
 
 #### Durable config lifecycle
 
@@ -410,11 +425,14 @@ The local `bridge.config.json` is now kept by default after a successful push:
 
 The `bridge-report.v1.json` and PR body now include:
 
-- Node/npm versions and platform info
-- Gate decisions with pass/fail status and reasons
-- Script diff outcomes (new failures, baseline noise, resolved)
+- Node/npm versions and platform info (`environment.npmVersion` is filled from `npm --version`)
+- Gate decisions with pass/fail status and reasons, including on blocked runs
+- Script diff outcomes (new failures, output-changed failures, baseline noise, resolved)
 - Audit severity deltas per scope
+- Package from→to table, bundle-size delta, and the local report path
 - Phase timing information
+
+If an open Bridge PR already has an identical diff, Bridge reuses it instead of opening a duplicate. If the same files changed with a new patch, Bridge updates that PR's branch.
 
 ### Pull request creation
 
@@ -424,7 +442,7 @@ Bridge creates a pull request after a successful candidate-branch push when
 changes your Git credentials. If `gh` is missing or unauthenticated, the branch
 still pushes safely and Bridge prints the compare URL plus an actionable notice.
 Bridge passes the normalized `origin` repository explicitly to GitHub CLI and
-reuses an already-open PR when a retry reaches the PR-creation step again.
+reuses an already-open PR when a retry reaches the PR-creation step again, and reuses or updates an open Bridge PR whose changes match the current patch.
 
 Git credentials alone cannot create a pull request because creation uses the
 GitHub API. A one-time `gh auth login` or a scoped token is therefore required
@@ -471,6 +489,20 @@ for Webpack/Rolldown-specific report formats or Python package analysis. Omit
   "updateCommand": "npm update",
   "cleanCommands": ["rm -rf node_modules"],
   "auditCommand": "npm audit --package-lock-only --json",
+  "blockOnNewVulnerabilities": true,
+  "allowMajorUpdates": false
+}
+```
+
+### Node.js (pnpm)
+
+```json
+{
+  "packageManager": "pnpm",
+  "installCommand": "pnpm install",
+  "updateCommand": "pnpm update",
+  "cleanCommands": ["rm -rf node_modules"],
+  "auditCommand": "pnpm audit --json",
   "blockOnNewVulnerabilities": true,
   "allowMajorUpdates": false
 }

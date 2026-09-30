@@ -16,6 +16,12 @@ import {
   formatValidationPrLine
 } from '../src/core/scriptDiff.js';
 import {
+  combineCommandStreams,
+  extractFailingExcerpt,
+  failureOutputChanged,
+  newErrorLines
+} from '../src/core/commandOutput.js';
+import {
   describeScriptLifecycleOrder,
   SCOPE_WORKFLOW_PHASE_ORDER
 } from '../src/core/scriptLifecycle.js';
@@ -369,18 +375,24 @@ test('audit: SEVERITIES contains all severity levels', () => {
   assert.equal(SEVERITIES.length, 5);
 });
 
-test('scriptDiff: empty before scripts with failing after scripts are new failures', () => {
+test('scriptDiff: after-only failures are not labeled as introduced by the update', () => {
   const beforeResults = captureScriptResults([]);
   const afterResults = captureScriptResults([
-    { command: 'npm test', success: false, code: 1 }
+    { command: 'npm run lint:ci', success: false, code: 1, stdout: 'no-console\n' }
   ]);
+  const comparison = compareScriptResults(beforeResults, afterResults, {
+    beforeCommands: []
+  });
+  const gate = evaluateScriptValidationGate(comparison, { label: 'root' });
 
-  const comparison = compareScriptResults(beforeResults, afterResults);
-
-  assert.equal(comparison.newFailureCount, 1);
-  assert.equal(comparison.baselineFailureCount, 0);
   assert.equal(comparison.hasNewFailures, true);
+  assert.equal(comparison.newFailures[0].notMeasuredOnBaseline, true);
+  assert.equal(gate.shouldBlock, true);
+  assert.match(gate.blockingMessages[0], /was not in beforeScripts/);
+  assert.doesNotMatch(gate.blockingMessages[0], /introduced by the update/);
+  assert.doesNotMatch(gate.blockingMessages[0], /not present on the committed baseline/);
 });
+
 
 test('scriptDiff: all passing scripts reports no failures', () => {
   const beforeResults = captureScriptResults([
@@ -489,5 +501,166 @@ test('script gate: pre-existing baseline failures do not block push/PR', () => {
   assert.match(
     formatNewFailureBlockMessage('root', { command: 'npm test', exitCode: 1 }),
     /Stopping before push\/PR/
+  );
+});
+
+test('scriptDiff: new error lines inside an already-failing command are NEW failures', () => {
+  const beforeResults = captureScriptResults([
+    {
+      command: 'node scripts/masked.mjs',
+      success: false,
+      code: 1,
+      stderr: 'BASELINE_ERROR: known lint failure\n'
+    }
+  ]);
+  const afterResults = captureScriptResults([
+    {
+      command: 'node scripts/masked.mjs',
+      success: false,
+      code: 1,
+      stderr:
+        'BASELINE_ERROR: known lint failure\nNEW_ERROR: introduced by the update\n'
+    }
+  ]);
+
+  const comparison = compareScriptResults(beforeResults, afterResults);
+  const gate = evaluateScriptValidationGate(comparison, { label: 'root' });
+
+  assert.equal(comparison.hasNewFailures, true);
+  assert.equal(comparison.hasBaselineNoise, false);
+  assert.equal(comparison.hasOutputChangedFailures, true);
+  assert.equal(comparison.newFailures[0].outputChanged, true);
+  assert.equal(gate.shouldBlock, true);
+  assert.match(gate.blockingMessages[0], /already-failing command/);
+  assert.match(formatValidationGateReason(comparison), /already-failing command/);
+});
+
+test('scriptDiff: identical failing output stays baseline noise', () => {
+  const output = 'error  no-unused-expressions  bridge.config.json:1:1\n';
+  const beforeResults = captureScriptResults([
+    { command: 'eslint .', success: false, code: 1, stdout: output }
+  ]);
+  const afterResults = captureScriptResults([
+    { command: 'eslint .', success: false, code: 1, stdout: output }
+  ]);
+
+  const comparison = compareScriptResults(beforeResults, afterResults);
+
+  assert.equal(comparison.hasNewFailures, false);
+  assert.equal(comparison.hasBaselineNoise, true);
+});
+
+test('scriptDiff: prettier-style extra file in failing output is a new failure', () => {
+  const beforeResults = captureScriptResults([
+    {
+      command: 'prettier --check .',
+      success: false,
+      code: 1,
+      stdout: 'bridge.config.json\nCode style issues found in the above file.\n'
+    }
+  ]);
+  const afterResults = captureScriptResults([
+    {
+      command: 'prettier --check .',
+      success: false,
+      code: 1,
+      stdout:
+        'bridge.config.json\ntypings/index.d.ts\nCode style issues found in the above files.\n'
+    }
+  ]);
+
+  const comparison = compareScriptResults(beforeResults, afterResults);
+
+  assert.equal(comparison.hasNewFailures, true);
+  assert.ok(comparison.newFailures[0].addedErrorLines.some((line) => /index\.d\.ts/.test(line)));
+});
+
+test('scriptDiff: unstructured output change is treated as a new failure (conservative)', () => {
+  const beforeResults = captureScriptResults([
+    { command: 'npm test', success: false, code: 1, stdout: 'TAP version 13\n1..1\n' }
+  ]);
+  const afterResults = captureScriptResults([
+    { command: 'npm test', success: false, code: 1, stdout: 'TAP version 13\n1..2\n' }
+  ]);
+
+  const comparison = compareScriptResults(beforeResults, afterResults);
+
+  assert.equal(comparison.hasNewFailures, true);
+  assert.equal(comparison.newFailures[0].outputChanged, true);
+  assert.equal(comparison.newFailures[0].conservativeMatch, true);
+});
+
+test('scriptDiff: temp paths and timings do not count as new failures', () => {
+  const beforeResults = captureScriptResults([
+    {
+      command: 'npm test',
+      success: false,
+      code: 1,
+      stdout: 'FAIL /tmp/bridge-repo-1/src/App.tsx (12.3ms)\nerror: no-console\n'
+    }
+  ]);
+  const afterResults = captureScriptResults([
+    {
+      command: 'npm test',
+      success: false,
+      code: 1,
+      stdout: 'FAIL /tmp/bridge-repo-9/src/App.tsx (48.1ms)\nerror: no-console\n'
+    }
+  ]);
+
+  const comparison = compareScriptResults(beforeResults, afterResults);
+
+  assert.equal(comparison.hasNewFailures, false);
+  assert.equal(comparison.hasBaselineNoise, true);
+});
+
+test('script gate: blockOnBaselineFailures stops on pre-existing failures', () => {
+  const beforeResults = captureScriptResults([
+    { command: 'npm run lint', success: false, code: 1, stderr: 'error' }
+  ]);
+  const afterResults = captureScriptResults([
+    { command: 'npm run lint', success: false, code: 1, stderr: 'error' }
+  ]);
+  const comparison = compareScriptResults(beforeResults, afterResults);
+  const gate = evaluateScriptValidationGate(comparison, {
+    label: 'root',
+    blockOnBaselineFailures: true
+  });
+
+  assert.equal(comparison.hasNewFailures, false);
+  assert.equal(gate.shouldBlock, true);
+  assert.match(gate.blockingMessages[0], /blockOnBaselineFailures/);
+});
+
+test('commandOutput: combines stdout and stderr instead of preferring stderr', () => {
+  const combined = combineCommandStreams(
+    '/tmp/src/App.tsx\n  1:1  error  no-console\n',
+    '$ eslint .\n'
+  );
+
+  assert.match(combined, /\$ eslint \./);
+  assert.match(combined, /no-console/);
+});
+
+test('commandOutput: excerpt prefers failing lines over command echoes', () => {
+  const excerpt = extractFailingExcerpt(
+    'typings/index.d.ts\nCode style issues found\n',
+    '$ prettier --check .\n'
+  );
+
+  assert.match(excerpt, /typings\/index\.d\.ts/);
+  assert.doesNotMatch(excerpt, /^\$ prettier/);
+});
+
+test('commandOutput: newErrorLines detects added findings', () => {
+  const added = newErrorLines(
+    'bridge.config.json\nCode style issues found',
+    'bridge.config.json\ntypings/index.d.ts\nCode style issues found'
+  );
+
+  assert.ok(added.some((line) => /index\.d\.ts/.test(line)));
+  assert.equal(
+    failureOutputChanged('same error', 'same error').changed,
+    false
   );
 });

@@ -5,7 +5,6 @@
  *
  * Usage:
  *   node corpus/scripts/run-fixture.mjs <fixture-name>
- *   node corpus/scripts/run-fixture.mjs clean-outdated
  */
 
 import { spawn } from 'node:child_process';
@@ -21,34 +20,77 @@ const ARTIFACTS_DIR = path.join(CORPUS_ROOT, 'artifacts');
 
 async function findBridgeCli() {
   const binPath = path.join(REPO_ROOT, 'bin', 'bridge.js');
-  try {
-    await fs.access(binPath);
-    return binPath;
-  } catch {
-    throw new Error(`Bridge CLI not found at ${binPath}`);
-  }
+  await fs.access(binPath);
+  return binPath;
 }
 
 async function fixtureExists(name) {
-  const fixturePath = path.join(FIXTURES_DIR, name);
   try {
-    const stat = await fs.stat(fixturePath);
+    const stat = await fs.stat(path.join(FIXTURES_DIR, name));
     return stat.isDirectory();
   } catch {
     return false;
   }
 }
 
-function runBridgePatch(bridgeCli, fixturePath, verbose = false) {
+async function loadExpected(fixturePath) {
+  try {
+    return JSON.parse(await fs.readFile(path.join(fixturePath, 'expected.json'), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+async function readLatestReport(bridgeHome) {
+  const runsDir = path.join(bridgeHome, 'runs');
+  let entries = [];
+
+  try {
+    entries = await fs.readdir(runsDir, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+
+  const reports = [];
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+
+    const reportPath = path.join(runsDir, entry.name, 'bridge-report.v1.json');
+
+    try {
+      const stat = await fs.stat(reportPath);
+      reports.push({ reportPath, modifiedMs: stat.mtimeMs });
+    } catch {
+      // ignore incomplete run dirs
+    }
+  }
+
+  reports.sort((left, right) => right.modifiedMs - left.modifiedMs);
+
+  if (reports.length === 0) {
+    return null;
+  }
+
+  return JSON.parse(await fs.readFile(reports[0].reportPath, 'utf8'));
+}
+
+function runBridgePatch(bridgeCli, fixturePath, { verbose = false, bridgeHome }) {
   return new Promise((resolve) => {
     const startTime = Date.now();
-    const args = ['patch', '--dry-run', '--keep-workspace'];
+    const args = ['patch', '--dry-run'];
     if (verbose) args.push('--verbose');
 
     const child = spawn('node', [bridgeCli, ...args], {
       cwd: fixturePath,
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, FORCE_COLOR: '0' }
+      env: {
+        ...process.env,
+        FORCE_COLOR: '0',
+        BRIDGE_HOME: bridgeHome
+      }
     });
 
     let stdout = '';
@@ -65,8 +107,7 @@ function runBridgePatch(bridgeCli, fixturePath, verbose = false) {
     });
 
     child.on('close', (code) => {
-      const durationMs = Date.now() - startTime;
-      resolve({ code, stdout, stderr, durationMs });
+      resolve({ code, stdout, stderr, durationMs: Date.now() - startTime });
     });
 
     child.on('error', (err) => {
@@ -80,40 +121,96 @@ function runBridgePatch(bridgeCli, fixturePath, verbose = false) {
   });
 }
 
-function parseRunResult(fixtureName, result) {
-  const { code, stdout, stderr, durationMs } = result;
+function harnessStatus(code, stdout, report) {
+  const reportStatus = report?.run?.status;
+  if (reportStatus === 'up_to_date' || report?.outcome?.earlyExit?.code === 'no_updates') {
+    return 'up_to_date';
+  }
+  if (
+    stdout.includes('All dependencies are already up to date') ||
+    stdout.includes('No dependencies to update')
+  ) {
+    return 'up_to_date';
+  }
+  if (code === 0) {
+    return 'patched';
+  }
+  return 'failed';
+}
 
-  const status =
-    code === 0
-      ? stdout.includes('All dependencies are already up to date') ||
-        stdout.includes('No dependencies to update')
-        ? 'up_to_date'
-        : 'patched'
-      : 'failed';
-
-  const hasBaselineNoise = stdout.includes('baseline script failure');
+function parseRunResult(fixtureName, result, report) {
+  const { code, stdout, durationMs } = result;
+  const validation = report?.outcome?.validation || [];
   const hasNewFailures =
-    code !== 0 && stdout.includes('After-update validation failed');
-
-  const updatedDepsMatch = stdout.match(
-    /Deltas: (\d+) direct, (\d+) transitive/
-  );
-  const directUpdates = updatedDepsMatch ? parseInt(updatedDepsMatch[1], 10) : 0;
-  const transitiveUpdates = updatedDepsMatch
-    ? parseInt(updatedDepsMatch[2], 10)
-    : 0;
+    validation.some((entry) => entry.hasNewFailures) ||
+    report?.outcome?.earlyExit?.code === 'validation_block' ||
+    /NEW after-script failure|already-failing command|was not in beforeScripts/.test(stdout);
+  const hasBaselineNoise = validation.some((entry) => entry.hasBaselineNoise);
+  const directUpdates = report?.outcome?.dependencySummary?.directChanged ??
+    Number((stdout.match(/Deltas: (\d+) direct/) || [])[1] || 0);
+  const transitiveUpdates = report?.outcome?.dependencySummary?.transitiveChanged ??
+    Number((stdout.match(/Deltas: (\d+) direct, (\d+) transitive/) || [])[2] || 0);
+  const phases = (report?.phases || []).map((phase) => String(phase.phase || '').split(':')[0]);
 
   return {
     fixture: fixtureName,
-    status,
+    status: harnessStatus(code, stdout, report),
+    reportStatus: report?.run?.status || null,
     exitCode: code,
     durationMs,
     directUpdates,
     transitiveUpdates,
     hasBaselineNoise,
     hasNewFailures,
+    phases,
+    earlyExit: report?.outcome?.earlyExit || null,
+    blockedCount: report?.outcome?.blockedCount || 0,
     timestamp: new Date().toISOString()
   };
+}
+
+function assertExpected(parsed, expected) {
+  if (!expected) {
+    return ['missing expected.json'];
+  }
+
+  const mismatches = [];
+
+  if (expected.status && parsed.status !== expected.status) {
+    mismatches.push(`status: got ${parsed.status}, expected ${expected.status}`);
+  }
+
+  if (typeof expected.exitCode === 'number' && parsed.exitCode !== expected.exitCode) {
+    mismatches.push(`exitCode: got ${parsed.exitCode}, expected ${expected.exitCode}`);
+  }
+
+  if (typeof expected.hasNewFailures === 'boolean' && parsed.hasNewFailures !== expected.hasNewFailures) {
+    mismatches.push(
+      `hasNewFailures: got ${parsed.hasNewFailures}, expected ${expected.hasNewFailures}`
+    );
+  }
+
+  if (typeof expected.hasBaselineNoise === 'boolean' && parsed.hasBaselineNoise !== expected.hasBaselineNoise) {
+    mismatches.push(
+      `hasBaselineNoise: got ${parsed.hasBaselineNoise}, expected ${expected.hasBaselineNoise}`
+    );
+  }
+
+  if (typeof expected.minDirectUpdates === 'number' && parsed.directUpdates < expected.minDirectUpdates) {
+    mismatches.push(
+      `directUpdates: got ${parsed.directUpdates}, expected >= ${expected.minDirectUpdates}`
+    );
+  }
+
+  if (Array.isArray(expected.absentPhases)) {
+    for (const phase of expected.absentPhases) {
+      if (parsed.phases.includes(phase)) {
+        mismatches.push(`phase ${phase} should be absent after early exit`);
+      }
+    }
+  }
+
+  return mismatches;
 }
 
 export async function runFixture(fixtureName, options = {}) {
@@ -125,31 +222,45 @@ export async function runFixture(fixtureName, options = {}) {
 
   const bridgeCli = await findBridgeCli();
   const fixturePath = path.join(FIXTURES_DIR, fixtureName);
+  const expected = await loadExpected(fixturePath);
+  const bridgeHome = path.join(ARTIFACTS_DIR, fixtureName, 'bridge-home');
+  await fs.mkdir(bridgeHome, { recursive: true });
 
   console.log(`\n[corpus] Running fixture: ${fixtureName}`);
   console.log(`[corpus] Fixture path: ${fixturePath}`);
   console.log(`[corpus] Bridge CLI: ${bridgeCli}`);
 
-  const result = await runBridgePatch(bridgeCli, fixturePath, verbose);
-  const parsed = parseRunResult(fixtureName, result);
+  const result = await runBridgePatch(bridgeCli, fixturePath, { verbose, bridgeHome });
+  const report = await readLatestReport(bridgeHome);
+  const parsed = parseRunResult(fixtureName, result, report);
+  const mismatches = assertExpected(parsed, expected);
+  parsed.expected = expected;
+  parsed.mismatches = mismatches;
+  parsed.matched = mismatches.length === 0;
 
   console.log(`[corpus] Status: ${parsed.status}`);
   console.log(`[corpus] Exit code: ${parsed.exitCode}`);
   console.log(`[corpus] Duration: ${parsed.durationMs}ms`);
+  if (mismatches.length > 0) {
+    console.log(`[corpus] Expected-outcome mismatches:`);
+    for (const mismatch of mismatches) {
+      console.log(`[corpus]   - ${mismatch}`);
+    }
+  } else {
+    console.log(`[corpus] Expected outcome matched`);
+  }
 
   if (saveArtifacts) {
     await fs.mkdir(ARTIFACTS_DIR, { recursive: true });
-    const artifactPath = path.join(
-      ARTIFACTS_DIR,
-      `${fixtureName}-result.json`
-    );
+    const artifactPath = path.join(ARTIFACTS_DIR, `${fixtureName}-result.json`);
     await fs.writeFile(
       artifactPath,
       JSON.stringify(
         {
           ...parsed,
           stdout: result.stdout,
-          stderr: result.stderr
+          stderr: result.stderr,
+          report
         },
         null,
         2
@@ -166,15 +277,6 @@ async function main() {
 
   if (!fixtureName) {
     console.error('Usage: node run-fixture.mjs <fixture-name>');
-    console.error('');
-    console.error('Available fixtures:');
-    const fixtures = await fs.readdir(FIXTURES_DIR);
-    for (const f of fixtures) {
-      const stat = await fs.stat(path.join(FIXTURES_DIR, f));
-      if (stat.isDirectory()) {
-        console.error(`  - ${f}`);
-      }
-    }
     process.exit(1);
   }
 
@@ -182,7 +284,7 @@ async function main() {
 
   try {
     const result = await runFixture(fixtureName, { verbose });
-    process.exit(result.exitCode === 0 || result.hasBaselineNoise ? 0 : 1);
+    process.exit(result.matched ? 0 : 1);
   } catch (err) {
     console.error(`[corpus] Error: ${err.message}`);
     process.exit(1);

@@ -1,8 +1,8 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
-import { CONFIG_FILE_NAME } from '../constants.js';
-import { isPathTrackedOrInHistory } from './git.js';
+import { CONFIG_CANDIDATES, CONFIG_FILE_NAME } from '../constants.js';
+import { isPathTracked, isPathTrackedOrInHistory } from './git.js';
 
 async function fileExists(filePath) {
   try {
@@ -68,4 +68,67 @@ export async function cleanupLocalConfigAfterSuccessfulPush(
       error: cleanupError
     };
   }
+}
+
+export async function isolateUntrackedBridgeConfig({
+  workspaceDir,
+  sourceConfigPath = '',
+  configFileNames = CONFIG_CANDIDATES
+} = {}) {
+  const hiddenDir = path.join(workspaceDir, '.git', 'bridge');
+  const results = [];
+
+  await fs.mkdir(hiddenDir, { recursive: true });
+
+  for (const configFileName of configFileNames) {
+    const workspaceConfigPath = path.join(workspaceDir, configFileName);
+    const hiddenPath = path.join(hiddenDir, configFileName);
+    const tracked = await isPathTracked(workspaceDir, configFileName);
+
+    if (tracked) {
+      results.push({
+        fileName: configFileName,
+        isolated: false,
+        reason: 'tracked',
+        path: workspaceConfigPath
+      });
+      continue;
+    }
+
+    if (await fileExists(workspaceConfigPath)) {
+      await fs.rename(workspaceConfigPath, hiddenPath);
+      results.push({
+        fileName: configFileName,
+        isolated: true,
+        reason: 'moved',
+        path: hiddenPath
+      });
+      continue;
+    }
+
+    const sourceName = sourceConfigPath ? path.basename(sourceConfigPath) : '';
+    if (sourceConfigPath && sourceName === configFileName && (await fileExists(sourceConfigPath))) {
+      await fs.copyFile(sourceConfigPath, hiddenPath);
+      results.push({
+        fileName: configFileName,
+        isolated: true,
+        reason: 'copied_hidden',
+        path: hiddenPath
+      });
+      continue;
+    }
+
+    results.push({
+      fileName: configFileName,
+      isolated: false,
+      reason: 'missing',
+      path: ''
+    });
+  }
+
+  return {
+    hiddenDir,
+    isolated: results.some((entry) => entry.isolated),
+    results
+  };
 }

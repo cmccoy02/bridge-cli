@@ -1,0 +1,13 @@
+{
+  "name": "corpus-new-failure",
+  "packageManager": "npm",
+  "installCommand": "npm ci",
+  "updateCommand": "npm update",
+  "cleanCommands": ["rm -rf node_modules"],
+  "beforeScripts": ["npm run lint", "npm run guard"],
+  "afterScripts": ["npm run lint", "npm run guard"],
+  "allowMajorUpdates": false,
+  "pullRequest": {
+    "enabled": false
+  }
+}

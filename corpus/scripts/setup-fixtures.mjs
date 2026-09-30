@@ -44,14 +44,41 @@ async function fixtureHasGit(fixturePath) {
   }
 }
 
+async function ensureGitignore(fixturePath) {
+  const gitignorePath = path.join(fixturePath, '.gitignore');
+  try {
+    await fs.access(gitignorePath);
+  } catch {
+    await fs.writeFile(gitignorePath, 'node_modules/\n', 'utf8');
+  }
+}
+
+async function commitIfDirty(fixturePath, message) {
+  exec('git add -A', fixturePath);
+  const status = exec('git status --porcelain', fixturePath).trim();
+  if (!status) {
+    return false;
+  }
+  exec(`git commit -q -m "${message}"`, fixturePath);
+  return true;
+}
+
 async function setupFixture(name) {
   const fixturePath = path.join(FIXTURES_DIR, name);
   const barePath = path.join(REMOTES_DIR, `${name}.git`);
 
   console.log(`[setup] Setting up fixture: ${name}`);
+  await ensureGitignore(fixturePath);
 
   if (await fixtureHasGit(fixturePath)) {
-    console.log(`[setup]   Already initialized, skipping`);
+    const committed = await commitIfDirty(fixturePath, 'Update fixture files');
+    if (committed) {
+      const branchResult = exec('git branch --show-current', fixturePath).trim();
+      console.log(`[setup]   Pushed fixture updates (${branchResult})`);
+      exec(`git push -u origin ${branchResult}`, fixturePath);
+    } else {
+      console.log(`[setup]   Already initialized, skipping`);
+    }
     return;
   }
 

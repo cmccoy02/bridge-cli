@@ -1,5 +1,27 @@
 export const CONFIG_FILE_NAME = 'bridge.config.json';
+export const HIDDEN_CONFIG_FILE_NAME = '.bridge.config.json';
+export const CONFIG_CANDIDATES = [CONFIG_FILE_NAME, HIDDEN_CONFIG_FILE_NAME];
 export const DEFAULT_BRANCH_PREFIX = 'bridge/patch';
+
+export const DEPENDENCY_ARTIFACT_BASENAMES = new Set([
+  'package.json',
+  'package-lock.json',
+  'npm-shrinkwrap.json',
+  'yarn.lock',
+  'pnpm-lock.yaml',
+  'pnpm-workspace.yaml',
+  'bun.lock',
+  'bun.lockb',
+  'pyproject.toml',
+  'poetry.lock',
+  'Pipfile',
+  'Pipfile.lock',
+  'requirements.txt',
+  'requirements.in',
+  'uv.lock',
+  'mix.exs',
+  'mix.lock'
+]);
 
 export const REQUIRED_CONFIG_FIELDS = [
   'packageManager',
@@ -24,8 +46,9 @@ export const PACKAGE_MANAGER_PRESETS = {
     installCommand: 'yarn install',
     updateCommand: 'yarn upgrade',
     cleanCommands: ['rm -rf node_modules'],
+    auditCommand: 'yarn audit --json',
     lockfile: 'yarn.lock',
-    lockfileFormat: null,
+    lockfileFormat: 'yarn-lock',
     manifest: 'package.json'
   },
   pnpm: {
@@ -33,8 +56,9 @@ export const PACKAGE_MANAGER_PRESETS = {
     installCommand: 'pnpm install',
     updateCommand: 'pnpm update',
     cleanCommands: ['rm -rf node_modules'],
+    auditCommand: 'pnpm audit --json',
     lockfile: 'pnpm-lock.yaml',
-    lockfileFormat: null,
+    lockfileFormat: 'yaml-pnpm',
     manifest: 'package.json'
   },
   poetry: {
@@ -129,6 +153,7 @@ export const DEFAULT_CONFIG = {
   afterScripts: [],
   auditCommand: PACKAGE_MANAGER_PRESETS.npm.auditCommand,
   blockOnNewVulnerabilities: true,
+  blockOnBaselineFailures: false,
   allowMajorUpdates: false,
   pullRequest: {
     enabled: true,

@@ -213,6 +213,7 @@ test('P0: config file left unchanged when loading and normalizing', async (t) =>
   // Config should be normalized in memory
   assert.equal(config.packageManager, 'npm');
   assert.equal(config.blockOnNewVulnerabilities, true); // default value
+  assert.equal(config.blockOnBaselineFailures, false);
 
   // File should be unchanged
   const afterContent = await fs.readFile(configPath, 'utf8');

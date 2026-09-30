@@ -119,6 +119,160 @@ function parseNpmLockfile(content) {
   return map;
 }
 
+function parsePnpmPackageKey(rawKey) {
+  let key = String(rawKey || '').trim();
+
+  if (!key) {
+    return null;
+  }
+
+  key = key.replace(/^\//, '');
+  key = key.replace(/\([^)]*\)/g, '');
+
+  const match = key.match(/^(@[^/]+\/[^@]+|[^@]+)@(.+)$/);
+
+  if (!match) {
+    return null;
+  }
+
+  return {
+    name: match[1],
+    version: match[2]
+  };
+}
+
+function parsePnpmLockfile(content) {
+  const map = new Map();
+  const lines = content.split(/\r?\n/);
+  let inPackages = false;
+
+  for (const raw of lines) {
+    if (/^packages:\s*$/.test(raw)) {
+      inPackages = true;
+      continue;
+    }
+
+    if (
+      inPackages &&
+      raw.length > 0 &&
+      !raw.startsWith(' ') &&
+      !raw.startsWith('\t') &&
+      raw.includes(':')
+    ) {
+      inPackages = false;
+    }
+
+    if (!inPackages) {
+      continue;
+    }
+
+    const keyMatch = raw.match(/^ {2}(?:'([^']+)'|"([^"]+)"|([^:]+)):/);
+
+    if (!keyMatch) {
+      continue;
+    }
+
+    const key = (keyMatch[1] || keyMatch[2] || keyMatch[3] || '').trim();
+
+    if (!key) {
+      continue;
+    }
+
+    const parsed = parsePnpmPackageKey(key);
+
+    if (!parsed) {
+      continue;
+    }
+
+    map.set(parsed.name, {
+      name: parsed.name,
+      version: parsed.version,
+      normalizedName: normalizeName(parsed.name, 'yaml-pnpm')
+    });
+  }
+
+  return map;
+}
+
+function nameFromYarnDescriptor(descriptor) {
+  const value = String(descriptor || '')
+    .trim()
+    .replace(/^"+|"+$/g, '');
+
+  if (!value || value.startsWith('__')) {
+    return '';
+  }
+
+  if (value.startsWith('@')) {
+    const slash = value.indexOf('/');
+    const at = value.indexOf('@', slash === -1 ? 1 : slash);
+
+    return at === -1 ? value : value.slice(0, at);
+  }
+
+  const at = value.indexOf('@');
+  return at === -1 ? value : value.slice(0, at);
+}
+
+function parseYarnLockfile(content) {
+  const map = new Map();
+  const lines = content.split(/\r?\n/);
+  let descriptors = [];
+  let version = '';
+
+  function flush() {
+    if (!descriptors.length || !version) {
+      descriptors = [];
+      version = '';
+      return;
+    }
+
+    for (const descriptor of descriptors) {
+      const name = nameFromYarnDescriptor(descriptor);
+
+      if (!name) {
+        continue;
+      }
+
+      map.set(descriptor, {
+        name,
+        version,
+        normalizedName: normalizeName(name, 'yarn-lock')
+      });
+    }
+
+    descriptors = [];
+    version = '';
+  }
+
+  for (const raw of lines) {
+    if (!raw.trim() || raw.trimStart().startsWith('#')) {
+      continue;
+    }
+
+    const indented = /^\s/.test(raw);
+
+    if (!indented && raw.includes(':')) {
+      flush();
+      const header = raw.trim().replace(/:\s*$/, '');
+      descriptors = header
+        .split(/,\s*/)
+        .map((entry) => entry.replace(/^"+|"+$/g, '').trim())
+        .filter(Boolean);
+      continue;
+    }
+
+    const versionMatch = raw.match(/^\s+version\s*:?\s*"?([^"]+)"?\s*$/);
+
+    if (versionMatch) {
+      version = versionMatch[1].trim();
+    }
+  }
+
+  flush();
+  return map;
+}
+
 function parsePipfileLock(content) {
   let parsed;
 
@@ -705,6 +859,10 @@ export function parseLockfile(content, format) {
   switch (format) {
     case 'json-npm':
       return parseNpmLockfile(text);
+    case 'yaml-pnpm':
+      return parsePnpmLockfile(text);
+    case 'yarn-lock':
+      return parseYarnLockfile(text);
     case 'json-pipfile':
       return parsePipfileLock(text);
     case 'toml-poetry':

@@ -1,0 +1,5 @@
+{
+  "status": "up_to_date",
+  "exitCode": 0,
+  "absentPhases": ["candidate_reinstall", "afterScripts"]
+}

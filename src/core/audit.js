@@ -46,7 +46,58 @@ export function defaultAuditCommand(packageManager) {
     return 'npm audit --package-lock-only --json';
   }
 
+  if (packageManager === 'pnpm') {
+    return 'pnpm audit --json';
+  }
+
+  if (packageManager === 'yarn') {
+    return 'yarn audit --json';
+  }
+
   return '';
+}
+
+function parseYarnAuditJson(raw) {
+  const lines = String(raw || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    try {
+      const parsed = JSON.parse(lines[index]);
+      const vulnerabilities =
+        parsed?.data?.vulnerabilities || parsed?.vulnerabilities || parsed?.metadata?.vulnerabilities;
+
+      if (parsed?.type === 'auditSummary' && vulnerabilities) {
+        return {
+          format: 'yarn-audit',
+          counts: normalizeCounts(vulnerabilities)
+        };
+      }
+
+      if (vulnerabilities && typeof vulnerabilities === 'object') {
+        return {
+          format: 'yarn-audit',
+          counts: normalizeCounts(vulnerabilities)
+        };
+      }
+    } catch {
+      // Keep scanning NDJSON from the end.
+    }
+  }
+
+  throw new Error('Unrecognized yarn audit JSON');
+}
+
+export function parseAuditJson(raw) {
+  const text = String(raw || '').trim();
+
+  try {
+    return parseNpmAuditJson(text);
+  } catch {
+    return parseYarnAuditJson(text);
+  }
 }
 
 export async function captureAuditSnapshot({
@@ -75,7 +126,7 @@ export async function captureAuditSnapshot({
   const raw = result.stdout.trim() || result.stderr.trim();
 
   try {
-    const parsed = parseNpmAuditJson(raw);
+    const parsed = parseAuditJson(raw);
     return {
       supported: true,
       parsed: true,

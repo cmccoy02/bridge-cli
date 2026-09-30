@@ -97,7 +97,9 @@ async function runAllFixtures(options = {}) {
       patched: results.filter((r) => r.status === 'patched').length,
       upToDate: results.filter((r) => r.status === 'up_to_date').length,
       failed: results.filter((r) => r.status === 'failed').length,
-      error: results.filter((r) => r.status === 'error').length
+      error: results.filter((r) => r.status === 'error').length,
+      matched: results.filter((r) => r.matched).length,
+      mismatched: results.filter((r) => r.matched === false).length
     },
     results
   };
@@ -161,9 +163,14 @@ async function main() {
 
   try {
     const scoreboard = await runAllFixtures(options);
-    const failedCount =
-      scoreboard.summary.failed + scoreboard.summary.error;
-    process.exit(failedCount > 0 ? 1 : 0);
+    const failedAssertions =
+      scoreboard.summary.mismatched + scoreboard.summary.error;
+    if (failedAssertions > 0) {
+      console.error(
+        `[corpus] ${failedAssertions} fixture(s) did not match expected outcomes.`
+      );
+    }
+    process.exit(failedAssertions > 0 ? 1 : 0);
   } catch (err) {
     console.error(`[corpus] Fatal error: ${err.message}`);
     process.exit(1);

@@ -35,6 +35,9 @@ corpus/
 │   ├── up-to-date/         # Nothing to update (early exit)
 │   ├── preexisting-fail/   # Failing script before+after (baseline noise)
 │   ├── skip-major/         # Tests allowMajorUpdates policy
+│   ├── new-failure/        # After-update script fails (hard-stop)
+│   ├── masked-failure/     # New errors inside an already-failing command
+│   ├── pnpm-outdated/      # pnpm lockfile metrics and patch flow
 │   └── .remotes/           # Bare git repos for fixture remotes (gitignored)
 ├── scripts/
 │   ├── setup-fixtures.mjs  # Initialize fixture git repos (run once)
@@ -45,6 +48,8 @@ corpus/
 │   └── <fixture>-result.json   # Per-fixture detailed results
 └── README.md
 ```
+
+Each fixture includes `expected.json`. The harness asserts Bridge's outcome against that file (using `bridge-report.v1.json` when available) and **fails CI when they do not match**. Add `expected.json` when creating a new fixture.
 
 ## Adding a New Fixture
 
@@ -143,6 +148,8 @@ corpus/fixtures/
 The `.github/workflows/corpus.yml` workflow:
 - Runs on `workflow_dispatch` (manual trigger)
 - Runs on schedule (weekdays at 06:00 UTC)
-- Runs on PRs that modify `corpus/**`
+- Runs on PRs and pushes that modify corpus, src, or the workflow
+- Uses Node 24 actions on `ubuntu-24.04`
+- Fails the job when a fixture does not match `expected.json`
 - Uploads artifacts and scoreboard
 - Never pushes to external remotes
