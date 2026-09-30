@@ -208,7 +208,9 @@ test('new after-script failures hard-stop before push/PR', async (t) => {
     beforeScripts: [
       'node -e "const p=require(\'./package-lock.json\'); if (p.packages[\'node_modules/example\'].version !== \'1.0.0\') process.exit(1)"'
     ],
-    afterScripts: ['node -e "process.exit(1)"']
+    afterScripts: [
+      'node -e "const p=require(\'./package-lock.json\'); if (p.packages[\'node_modules/example\'].version !== \'1.0.0\') process.exit(1)"'
+    ]
   });
 
   const result = await runPatch(repoDir, bridgeHome);

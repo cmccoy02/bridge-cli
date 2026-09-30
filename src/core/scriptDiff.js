@@ -3,27 +3,28 @@
  *
  * Captures baseline script failures and compares them against after-script
  * results to detect NEW failures (regressions) vs baseline noise.
+ *
+ * Matching is command + exit code + normalized failure output. A command that
+ * already fails on the baseline still blocks when the update introduces new
+ * error lines (or when output changes and we cannot prove it is the same).
  */
 
-function normalizeOutput(text, limit = 500) {
-  const trimmed = (text || '').trim();
-
-  if (!trimmed) {
-    return '';
-  }
-
-  if (trimmed.length <= limit) {
-    return trimmed;
-  }
-
-  return `${trimmed.slice(0, limit)}... [truncated]`;
-}
+import {
+  combineCommandStreams,
+  extractFailingExcerpt,
+  failureOutputChanged,
+  outputFromResult
+} from './commandOutput.js';
 
 function createScriptFingerprint(result) {
+  const stdout = result.stdout || '';
+  const stderr = result.stderr || '';
+  const output = combineCommandStreams(stdout, stderr);
+
   return {
     command: result.command || '',
     exitCode: result.code ?? result.exitCode ?? null,
-    output: normalizeOutput(result.stderr || result.stdout || '')
+    output
   };
 }
 
@@ -37,6 +38,8 @@ export function captureScriptResults(results) {
     success: result.success !== false,
     exitCode: result.code ?? result.exitCode ?? null,
     durationMs: result.durationMs || 0,
+    stdout: result.stdout || '',
+    stderr: result.stderr || '',
     fingerprint: createScriptFingerprint(result)
   }));
 }
@@ -49,35 +52,83 @@ function commandsMatch(a, b) {
   return a.command === b.command;
 }
 
+function resultOutput(result) {
+  return outputFromResult(result) || result?.fingerprint?.output || '';
+}
+
 function failuresMatch(beforeFailure, afterFailure) {
   if (!commandsMatch(beforeFailure, afterFailure)) {
     return false;
   }
 
-  return beforeFailure.fingerprint.exitCode === afterFailure.fingerprint.exitCode;
+  const change = failureOutputChanged(
+    resultOutput(beforeFailure),
+    resultOutput(afterFailure)
+  );
+
+  return !change.changed;
 }
 
-export function compareScriptResults(beforeResults, afterResults) {
+function commandWasMeasuredOnBaseline(command, beforeResults, beforeCommands) {
+  if (beforeResults.some((result) => result.command === command)) {
+    return true;
+  }
+
+  if (beforeCommands instanceof Set) {
+    return beforeCommands.has(command);
+  }
+
+  if (Array.isArray(beforeCommands)) {
+    return beforeCommands.includes(command);
+  }
+
+  return false;
+}
+
+export function compareScriptResults(beforeResults, afterResults, options = {}) {
   const beforeFailures = getFailedScripts(beforeResults);
   const afterFailures = getFailedScripts(afterResults);
+  const beforeCommands = options.beforeCommands;
 
   const newFailures = [];
   const baselineFailures = [];
   const resolved = [];
+  const outputChangedFailures = [];
 
   for (const afterFailure of afterFailures) {
     const matchingBefore = beforeFailures.find((before) =>
-      failuresMatch(before, afterFailure)
+      commandsMatch(before, afterFailure)
+    );
+    const measuredOnBaseline = commandWasMeasuredOnBaseline(
+      afterFailure.command,
+      beforeResults,
+      beforeCommands
     );
 
-    if (matchingBefore) {
+    if (matchingBefore && failuresMatch(matchingBefore, afterFailure)) {
       baselineFailures.push({
         before: matchingBefore,
         after: afterFailure
       });
-    } else {
-      newFailures.push(afterFailure);
+      continue;
     }
+
+    const annotated = { ...afterFailure };
+
+    if (!measuredOnBaseline) {
+      annotated.notMeasuredOnBaseline = true;
+    } else if (matchingBefore) {
+      const change = failureOutputChanged(
+        resultOutput(matchingBefore),
+        resultOutput(afterFailure)
+      );
+      annotated.outputChanged = true;
+      annotated.addedErrorLines = change.added;
+      annotated.conservativeMatch = change.conservative;
+      outputChangedFailures.push(annotated);
+    }
+
+    newFailures.push(annotated);
   }
 
   for (const beforeFailure of beforeFailures) {
@@ -98,8 +149,10 @@ export function compareScriptResults(beforeResults, afterResults) {
     resolvedCount: resolved.length,
     hasNewFailures: newFailures.length > 0,
     hasBaselineNoise: baselineFailures.length > 0,
+    hasOutputChangedFailures: outputChangedFailures.length > 0,
     newFailures,
     baselineFailures,
+    outputChangedFailures,
     resolved
   };
 }
@@ -107,6 +160,22 @@ export function compareScriptResults(beforeResults, afterResults) {
 export function formatNewFailureBlockMessage(label, failure) {
   const command = failure?.command || '(unknown command)';
   const exitCode = failure?.exitCode ?? failure?.code ?? '?';
+
+  if (failure?.notMeasuredOnBaseline) {
+    return (
+      `${label}: after-script failure in ${command} (exit code ${exitCode}). ` +
+      `This command is in afterScripts but was not in beforeScripts, so it was not measured on the committed baseline. ` +
+      `Stopping before push/PR.`
+    );
+  }
+
+  if (failure?.outputChanged) {
+    return (
+      `${label}: NEW after-script failure inside an already-failing command: ${command} ` +
+      `(exit code ${exitCode}). Failure output changed after the update ` +
+      `(new error lines not present on the committed baseline). Stopping before push/PR.`
+    );
+  }
 
   return (
     `${label}: NEW after-script failure introduced by the update: ${command} ` +
@@ -119,6 +188,13 @@ export function formatBaselinePersistNotice(label, count) {
   return (
     `${label}: ${count} pre-existing baseline script failure(s) were already present ` +
     `before the update. These are not new regressions and do not block push/PR.`
+  );
+}
+
+export function formatBaselineBlockNotice(label, count) {
+  return (
+    `${label}: ${count} baseline script failure(s) are blocking because ` +
+    `blockOnBaselineFailures is enabled. Stopping before push/PR.`
   );
 }
 
@@ -135,6 +211,25 @@ export function formatResolvedFailuresNotice(label, count) {
 
 export function formatValidationGateReason(comparison) {
   if (comparison?.hasNewFailures) {
+    const outputChanged = (comparison.newFailures || []).filter(
+      (failure) => failure.outputChanged
+    ).length;
+
+    if (outputChanged > 0) {
+      return (
+        `${comparison.newFailureCount} NEW script failure(s) introduced by the update, ` +
+        `including ${outputChanged} already-failing command(s) with new error output (blocking push/PR)`
+      );
+    }
+
+    const afterOnly = (comparison.newFailures || []).filter(
+      (failure) => failure.notMeasuredOnBaseline
+    ).length;
+
+    if (afterOnly > 0 && afterOnly === comparison.newFailureCount) {
+      return `${comparison.newFailureCount} after-script failure(s) not measured on the baseline (blocking push/PR)`;
+    }
+
     return `${comparison.newFailureCount} NEW script failure(s) introduced by the update (blocking push/PR)`;
   }
 
@@ -157,7 +252,10 @@ export function formatValidationPrLine(comparison, scopeLabel) {
   return `- **${scopeLabel}:** ✅ all scripts passed`;
 }
 
-export function evaluateScriptValidationGate(comparison, { label = 'root' } = {}) {
+export function evaluateScriptValidationGate(
+  comparison,
+  { label = 'root', blockOnBaselineFailures = false } = {}
+) {
   const blockingMessages = [];
   const notices = [];
 
@@ -168,9 +266,13 @@ export function evaluateScriptValidationGate(comparison, { label = 'root' } = {}
   }
 
   if (comparison?.hasBaselineNoise) {
-    notices.push(
-      formatBaselinePersistNotice(label, comparison.baselineFailureCount)
-    );
+    if (blockOnBaselineFailures) {
+      blockingMessages.push(
+        formatBaselineBlockNotice(label, comparison.baselineFailureCount)
+      );
+    } else {
+      notices.push(formatBaselinePersistNotice(label, comparison.baselineFailureCount));
+    }
   }
 
   if ((comparison?.resolvedCount || 0) > 0) {
@@ -193,9 +295,26 @@ export function formatScriptDiffSummary(comparison) {
   const parts = [];
 
   if (comparison.newFailureCount > 0) {
-    parts.push(
-      `${comparison.newFailureCount} NEW failure(s) introduced by the update (blocking)`
-    );
+    const outputChanged = (comparison.newFailures || []).filter(
+      (failure) => failure.outputChanged
+    ).length;
+    const afterOnly = (comparison.newFailures || []).filter(
+      (failure) => failure.notMeasuredOnBaseline
+    ).length;
+
+    if (outputChanged > 0) {
+      parts.push(
+        `${comparison.newFailureCount} NEW failure(s) introduced by the update, including output changes in already-failing commands (blocking)`
+      );
+    } else if (afterOnly === comparison.newFailureCount) {
+      parts.push(
+        `${comparison.newFailureCount} after-script failure(s) not measured on the baseline (blocking)`
+      );
+    } else {
+      parts.push(
+        `${comparison.newFailureCount} NEW failure(s) introduced by the update (blocking)`
+      );
+    }
   }
 
   if (comparison.baselineFailureCount > 0) {
@@ -215,8 +334,8 @@ export function formatScriptDiffSummary(comparison) {
   return `Script validation: ${parts.join(', ')}`;
 }
 
-export function createScriptDiffReport(beforeResults, afterResults) {
-  const comparison = compareScriptResults(beforeResults, afterResults);
+export function createScriptDiffReport(beforeResults, afterResults, options = {}) {
+  const comparison = compareScriptResults(beforeResults, afterResults, options);
 
   return {
     before: {
@@ -244,7 +363,9 @@ export function createScriptDiffReport(beforeResults, afterResults) {
     diff: {
       newFailures: comparison.newFailures.map((f) => ({
         command: f.command,
-        exitCode: f.exitCode
+        exitCode: f.exitCode,
+        outputChanged: Boolean(f.outputChanged),
+        notMeasuredOnBaseline: Boolean(f.notMeasuredOnBaseline)
       })),
       baselineFailures: comparison.baselineFailures.map((b) => ({
         command: b.after.command,
@@ -255,7 +376,12 @@ export function createScriptDiffReport(beforeResults, afterResults) {
         exitCode: r.exitCode
       })),
       hasNewFailures: comparison.hasNewFailures,
-      hasBaselineNoise: comparison.hasBaselineNoise
+      hasBaselineNoise: comparison.hasBaselineNoise,
+      hasOutputChangedFailures: comparison.hasOutputChangedFailures
     }
   };
+}
+
+export function excerptForFailure(failure) {
+  return extractFailingExcerpt(failure?.stdout, failure?.stderr);
 }

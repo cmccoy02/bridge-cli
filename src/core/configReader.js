@@ -2,12 +2,11 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 import {
+  CONFIG_CANDIDATES,
   CONFIG_FILE_NAME,
   DEFAULT_BRANCH_PREFIX,
   REQUIRED_CONFIG_FIELDS
 } from '../constants.js';
-
-const CONFIG_CANDIDATES = [CONFIG_FILE_NAME, '.bridge.config.json'];
 
 export class ConfigError extends Error {
   constructor(message, issues = []) {
@@ -85,6 +84,10 @@ function normalizeScope(scope) {
     blockOnNewVulnerabilities:
       typeof scope.blockOnNewVulnerabilities === 'boolean'
         ? scope.blockOnNewVulnerabilities
+        : undefined,
+    blockOnBaselineFailures:
+      typeof scope.blockOnBaselineFailures === 'boolean'
+        ? scope.blockOnBaselineFailures
         : undefined,
     allowMajorUpdates:
       typeof scope.allowMajorUpdates === 'boolean' ? scope.allowMajorUpdates : undefined,
@@ -251,6 +254,13 @@ function findShapeIssues(config) {
     issues.push('blockOnNewVulnerabilities must be true or false');
   }
 
+  if (
+    'blockOnBaselineFailures' in config &&
+    typeof config.blockOnBaselineFailures !== 'boolean'
+  ) {
+    issues.push('blockOnBaselineFailures must be true or false');
+  }
+
   if ('allowMajorUpdates' in config && typeof config.allowMajorUpdates !== 'boolean') {
     issues.push('allowMajorUpdates must be true or false');
   }
@@ -336,6 +346,15 @@ function findShapeIssues(config) {
         }
 
         if (
+          'blockOnBaselineFailures' in scope &&
+          typeof scope.blockOnBaselineFailures !== 'boolean'
+        ) {
+          issues.push(
+            `scopes[${index}].blockOnBaselineFailures must be true or false`
+          );
+        }
+
+        if (
           'allowMajorUpdates' in scope &&
           typeof scope.allowMajorUpdates !== 'boolean'
         ) {
@@ -395,6 +414,10 @@ export function normalizeConfig(config) {
       typeof config.blockOnNewVulnerabilities === 'boolean'
         ? config.blockOnNewVulnerabilities
         : true,
+    blockOnBaselineFailures:
+      typeof config.blockOnBaselineFailures === 'boolean'
+        ? config.blockOnBaselineFailures
+        : false,
     allowMajorUpdates:
       typeof config.allowMajorUpdates === 'boolean' ? config.allowMajorUpdates : false,
     bundleAnalysis: normalizeBundleAnalysis(config.bundleAnalysis),

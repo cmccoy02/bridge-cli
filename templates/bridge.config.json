@@ -6,9 +6,10 @@
   "cleanCommands": ["rm -rf node_modules"],
   "beforeScripts": [],
   "afterScripts": [],
-  "auditCommand": "npm audit --package-lock-only --json",
-  "blockOnNewVulnerabilities": true,
-  "allowMajorUpdates": false,
+    "auditCommand": "npm audit --package-lock-only --json",
+    "blockOnNewVulnerabilities": true,
+    "blockOnBaselineFailures": false,
+    "allowMajorUpdates": false,
   "pullRequest": {
     "enabled": true,
     "draft": false

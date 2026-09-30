@@ -41,6 +41,10 @@ program
   .option('--dry-run', 'Run without committing or pushing')
   .option('--keep-workspace', 'Keep the isolated workspace after a dry run for debugging')
   .option('--verbose', 'Stream command output while each phase runs')
+  .option(
+    '--block-on-baseline-failures',
+    'Stop before push/PR when before-scripts already fail on the committed baseline'
+  )
   .option('--scope <path>', 'Run only the root (.) or one configured nested scope')
   .option(
     '--local-package <name=path>',
@@ -53,6 +57,7 @@ program
       dryRun: options.dryRun,
       keepWorkspace: options.keepWorkspace,
       verbose: options.verbose,
+      blockOnBaselineFailures: options.blockOnBaselineFailures,
       scope: options.scope,
       localPackages: options.localPackage
     });
