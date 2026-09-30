@@ -61,6 +61,18 @@ function commandFailureDetails(error) {
     details.exitCode = error.code;
   }
 
+  if (error.stdout) {
+    details.stdout = redactSensitiveText(error.stdout);
+  }
+
+  if (error.stderr) {
+    details.stderr = redactSensitiveText(error.stderr);
+  }
+
+  if (error.gateType) {
+    details.gateType = error.gateType;
+  }
+
   return details;
 }
 
@@ -84,6 +96,10 @@ export async function writeFailureEvidence(runId, error) {
 
   if (error?.stdout) {
     lines.push('--- stdout ---', redactSensitiveText(error.stdout), '');
+  }
+
+  if (!error?.stderr && !error?.stdout && error?.output) {
+    lines.push('--- output ---', redactSensitiveText(error.output), '');
   }
 
   const failurePath = getRunFailurePath(runId);
@@ -307,7 +323,7 @@ function summarizeValidation(results = []) {
     }));
 }
 
-function collectGateDecisions(auditResults, validationResults) {
+function collectGateDecisions(auditResults, validationResults, bundleResults) {
   const decisions = [];
 
   for (const audit of auditResults || []) {
@@ -329,21 +345,33 @@ function collectGateDecisions(auditResults, validationResults) {
   }
 
   for (const validation of validationResults || []) {
-    if (validation?.comparison?.hasNewFailures) {
-      decisions.push({
-        gate: 'validation',
-        scope: validation.label || 'root',
-        passed: false,
-        reason: formatValidationGateReason(validation.comparison)
-      });
-    } else {
-      decisions.push({
-        gate: 'validation',
-        scope: validation.label || 'root',
-        passed: true,
-        reason: formatValidationGateReason(validation.comparison)
-      });
+    if (!validation?.comparison) {
+      continue;
     }
+
+    const blocked =
+      validation.blocked === true || validation.comparison.hasNewFailures;
+    decisions.push({
+      gate: 'validation',
+      scope: validation.label || 'root',
+      passed: !blocked,
+      reason: formatValidationGateReason(validation.comparison)
+    });
+  }
+
+  for (const bundle of bundleResults || []) {
+    if (!bundle?.comparison) {
+      continue;
+    }
+
+    decisions.push({
+      gate: 'bundle',
+      scope: bundle.label || 'root',
+      passed: !bundle.comparison.thresholdExceeded,
+      reason: bundle.comparison.thresholdExceeded
+        ? `Bundle size increased by ${Number(bundle.comparison.deltaPercent || 0).toFixed(2)}%`
+        : 'Bundle size within threshold'
+    });
   }
 
   return decisions;
@@ -377,7 +405,8 @@ export async function writeRunReport({
   earlyExit = null,
   phaseTiming = {},
   skippedCount = 0,
-  blockedCount = 0
+  blockedCount = 0,
+  environment = null
 } = {}) {
   const events = await readRunEvents(run.runId);
   const finishedEvent = [...events].reverse().find((event) => event.event === 'run_finished');
@@ -391,9 +420,12 @@ export async function writeRunReport({
   const resolvedBundles =
     bundleResults.length > 0 ? summarizeBundles(bundleResults) : bundlesFromEvents(events);
   const resolvedValidation = summarizeValidation(validationResults);
-  const gateDecisions = collectGateDecisions(auditResults, validationResults);
+  const gateDecisions = collectGateDecisions(auditResults, validationResults, bundleResults);
+  const failedGates = gateDecisions.filter((decision) => !decision.passed).length;
+  const resolvedBlockedCount = Math.max(blockedCount || 0, failedGates);
 
   const agentEventStreamPath = getAgentEventStreamPath(run.runId);
+  const resolvedEnvironment = environment || getEnvironmentInfo();
 
   const report = redactActivityPayload({
     schemaVersion: RUN_REPORT_SCHEMA_VERSION,
@@ -407,7 +439,7 @@ export async function writeRunReport({
       finishedAt: finishedEvent?.at || new Date().toISOString(),
       durationMs: Date.now() - run.startedAtMs
     },
-    environment: getEnvironmentInfo(),
+    environment: resolvedEnvironment,
     target: {
       repository: repo,
       configPath,
@@ -448,7 +480,7 @@ export async function writeRunReport({
       failure: commandFailureDetails(failure),
       earlyExit: earlyExit || null,
       skippedCount: skippedCount || 0,
-      blockedCount: blockedCount || 0
+      blockedCount: resolvedBlockedCount
     },
     phaseTiming: phaseTiming || {},
     phases: events
