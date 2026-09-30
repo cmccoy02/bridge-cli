@@ -1,3 +1,4 @@
+import { formatBytes } from './bundleAnalysis.js';
 import { commandExists, runCommand } from './executor.js';
 import { redactSensitiveText } from './redaction.js';
 import { formatValidationPrLine } from './scriptDiff.js';
@@ -75,13 +76,71 @@ function formatBumpSummary(byBump) {
   return parts.length > 0 ? parts.join(', ') : 'none';
 }
 
-function defaultBody({
+function formatPackageTable(deltas = []) {
+  const direct = (Array.isArray(deltas) ? deltas : [])
+    .filter((delta) => delta?.kind === 'direct' && delta.from !== delta.to)
+    .slice(0, 40);
+
+  if (direct.length === 0) {
+    return [];
+  }
+
+  const lines = [
+    '',
+    '### Package changes',
+    '',
+    '| Package | From | To | Type |',
+    '| --- | --- | --- | --- |'
+  ];
+
+  for (const delta of direct) {
+    lines.push(
+      `| \`${delta.name}\` | ${delta.from ?? '—'} | ${delta.to ?? '—'} | ${delta.bump || 'other'} |`
+    );
+  }
+
+  const omitted = deltas.filter((delta) => delta?.kind === 'direct').length - direct.length;
+
+  if (omitted > 0) {
+    lines.push('', `_Showing 40 of ${direct.length + omitted} direct package changes._`);
+  }
+
+  return lines;
+}
+
+function formatBundleSection(bundleResults = []) {
+  const entries = (Array.isArray(bundleResults) ? bundleResults : []).filter(
+    (entry) => entry?.comparison
+  );
+
+  if (entries.length === 0) {
+    return [];
+  }
+
+  const lines = ['', '### Bundle size'];
+
+  for (const entry of entries) {
+    const comparison = entry.comparison;
+    const sign = comparison.deltaBytes > 0 ? '+' : '';
+    const scopeLabel = entry.label || 'root';
+    lines.push(
+      `- **${scopeLabel} (${comparison.metric}):** ${formatBytes(comparison.beforeBytes)} → ${formatBytes(comparison.afterBytes)} (${sign}${formatBytes(comparison.deltaBytes)}, ${sign}${Number(comparison.deltaPercent || 0).toFixed(2)}%)`
+    );
+  }
+
+  return lines;
+}
+
+export function buildPullRequestBody({
   branchName,
   baseBranch,
   dependencySummary,
+  dependencyDeltas = [],
   auditResults,
   validationResults,
-  runReportPath
+  bundleResults = [],
+  runReportPath,
+  bridgeVersion = ''
 }) {
   const direct = Number(dependencySummary?.directChanged) || 0;
   const transitive = Number(dependencySummary?.transitiveChanged) || 0;
@@ -100,6 +159,13 @@ function defaultBody({
   if (byBump) {
     lines.push(`- **Update types:** ${formatBumpSummary(byBump)}`);
   }
+
+  if (bridgeVersion) {
+    lines.push(`- **Bridge:** ${bridgeVersion}`);
+  }
+
+  lines.push(...formatPackageTable(dependencyDeltas));
+  lines.push(...formatBundleSection(bundleResults));
 
   if (Array.isArray(auditResults) && auditResults.length > 0) {
     lines.push('', '### Security audit');
@@ -162,15 +228,192 @@ function defaultBody({
   return lines.join('\n');
 }
 
+export function normalizePullRequestDiff(diff) {
+  return String(diff || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/^index [0-9a-f]+\.\.[0-9a-f]+.*$/gim, '')
+    .replace(/[ \t]+$/gm, '')
+    .trim();
+}
+
+export function filesFromDiff(diff) {
+  const files = [];
+
+  for (const match of String(diff || '').matchAll(/^diff --git a\/(.+?) b\/(.+)$/gm)) {
+    files.push(match[2]);
+  }
+
+  return [...new Set(files)].sort();
+}
+
+function sameFileSet(left, right) {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  return left.every((file, index) => file === right[index]);
+}
+
+function isBridgePullRequest(entry, branchPrefix) {
+  const title = String(entry?.title || '');
+  const head = String(entry?.headRefName || '');
+  const prefix = String(branchPrefix || 'bridge/patch');
+
+  return title.startsWith('bridge:') || head === prefix || head.startsWith(`${prefix}-`);
+}
+
+export async function findReusableBridgePullRequest({
+  cwd,
+  repoUrl,
+  baseBranch,
+  branchPrefix = 'bridge/patch',
+  stagedDiff = '',
+  commandExistsFn = commandExists,
+  runCommandFn = runCommand
+} = {}) {
+  if (!stagedDiff || !(await commandExistsFn('gh'))) {
+    return null;
+  }
+
+  const repository = getGitHubRepository(repoUrl);
+  const listCommand = [
+    'gh pr list',
+    repository ? `--repo ${shellQuote(repository)}` : '',
+    '--state open',
+    '--limit 50',
+    '--json number,url,title,headRefName,baseRefName'
+  ]
+    .filter(Boolean)
+    .join(' ');
+  const listed = await runCommandFn(listCommand, {
+    cwd,
+    allowFailure: true,
+    quiet: true
+  });
+
+  if (!listed.success) {
+    return null;
+  }
+
+  let pullRequests = [];
+
+  try {
+    pullRequests = JSON.parse(listed.stdout || '[]');
+  } catch {
+    return null;
+  }
+
+  const candidates = (Array.isArray(pullRequests) ? pullRequests : []).filter(
+    (entry) =>
+      isBridgePullRequest(entry, branchPrefix) &&
+      (!baseBranch || !entry.baseRefName || entry.baseRefName === baseBranch)
+  );
+
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  const localFiles = filesFromDiff(stagedDiff);
+  const localNormalized = normalizePullRequestDiff(stagedDiff);
+
+  for (const candidate of candidates) {
+    const diffCommand = [
+      'gh pr diff',
+      String(candidate.number),
+      repository ? `--repo ${shellQuote(repository)}` : ''
+    ]
+      .filter(Boolean)
+      .join(' ');
+    const remote = await runCommandFn(diffCommand, {
+      cwd,
+      allowFailure: true,
+      quiet: true
+    });
+
+    if (!remote.success) {
+      continue;
+    }
+
+    const remoteDiff = remote.stdout || '';
+    const remoteNormalized = normalizePullRequestDiff(remoteDiff);
+    const remoteFiles = filesFromDiff(remoteDiff);
+
+    if (localNormalized && remoteNormalized && localNormalized === remoteNormalized) {
+      return {
+        ...candidate,
+        identical: true,
+        sameFiles: true
+      };
+    }
+
+    if (localFiles.length > 0 && sameFileSet(localFiles, remoteFiles)) {
+      return {
+        ...candidate,
+        identical: false,
+        sameFiles: true
+      };
+    }
+  }
+
+  return null;
+}
+
+export async function updatePullRequest({
+  cwd,
+  number,
+  repoUrl,
+  body = '',
+  title = '',
+  commandExistsFn = commandExists,
+  runCommandFn = runCommand
+} = {}) {
+  if (!number || !(await commandExistsFn('gh'))) {
+    return { status: 'unavailable', url: '', message: 'GitHub CLI is not available to update the pull request.' };
+  }
+
+  const repository = getGitHubRepository(repoUrl);
+  const command = [
+    'gh pr edit',
+    String(number),
+    repository ? `--repo ${shellQuote(repository)}` : '',
+    title ? `--title ${shellQuote(title)}` : '',
+    body ? `--body ${shellQuote(body)}` : ''
+  ]
+    .filter(Boolean)
+    .join(' ');
+  const updated = await runCommandFn(command, {
+    cwd,
+    allowFailure: true,
+    quiet: true
+  });
+
+  if (!updated.success) {
+    return {
+      status: 'failed',
+      url: '',
+      message: `GitHub CLI could not update pull request #${number}: ${redactSensitiveText(`${updated.stdout || ''}\n${updated.stderr || ''}`.trim()) || 'unknown error'}`
+    };
+  }
+
+  return {
+    status: 'updated',
+    url: '',
+    message: `Updated pull request #${number}`
+  };
+}
+
 export async function createPullRequest({
   cwd,
   branchName,
   baseBranch,
   repoUrl,
   dependencySummary,
+  dependencyDeltas = [],
   auditResults = [],
   validationResults = [],
+  bundleResults = [],
   runReportPath = '',
+  bridgeVersion = '',
   options,
   commandExistsFn = commandExists,
   runCommandFn = runCommand
@@ -205,13 +448,16 @@ export async function createPullRequest({
   }
 
   const title = config.title || 'bridge: update dependencies (non-breaking)';
-  const body = config.body || defaultBody({
+  const body = config.body || buildPullRequestBody({
     branchName,
     baseBranch,
     dependencySummary,
+    dependencyDeltas,
     auditResults,
     validationResults,
-    runReportPath
+    bundleResults,
+    runReportPath,
+    bridgeVersion
   });
   const repository = getGitHubRepository(repoUrl);
   const command = [
