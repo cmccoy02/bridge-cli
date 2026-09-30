@@ -19,6 +19,11 @@ import {
   makeRunContext
 } from '../core/activityLogger.js';
 import {
+  AgentEventStream,
+  computeFileSha256,
+  createEarlyExitReason
+} from '../core/agentTelemetry.js';
+import {
   BLOCKING_SEVERITIES,
   captureAuditSnapshot,
   compareAuditSnapshots,
@@ -41,6 +46,7 @@ import { CommandExecutionError, runCommand } from '../core/executor.js';
 import {
   assertSafeWorkingBranch,
   commitChanges,
+  getCurrentHeadSha,
   getOriginUrl,
   getCompareUrl,
   hasStagedChanges,
@@ -1218,9 +1224,30 @@ export async function patchCommand({
   let status = 'failed';
   let changedFilesCount = 0;
   let baseBranch = '';
+  let baseSha = '';
+  let headSha = '';
+  let stagedFiles = [];
   let failure = null;
   let failurePath = '';
   let runReportPath = '';
+  let configFileSha256 = '';
+  let configMutated = false;
+  let configStaged = false;
+  let earlyExit = null;
+  const phaseTiming = {};
+  let skippedCount = 0;
+  let blockedCount = 0;
+
+  const agentStream = new AgentEventStream(run.runId);
+  await agentStream.emitRunStart({
+    command: run.command,
+    cwd,
+    dryRun,
+    requestedScope,
+    configPath
+  });
+
+  configFileSha256 = await computeFileSha256(configPath);
 
   try {
     await runPhase({
@@ -1245,6 +1272,7 @@ export async function patchCommand({
     const configuredDefaultBranch = config.defaultBranch || '';
     const protectedBranches = config.protectedBranches || [];
 
+    agentStream.startPhase('clean_base');
     const cleanBaseResult = await runPhase({
       run,
       phase: 'clean_base',
@@ -1259,6 +1287,8 @@ export async function patchCommand({
         });
         baseBranch = result.branch;
         branchName = result.branchName;
+        baseSha = result.beforeSha || '';
+        headSha = result.afterSha || '';
 
         await restoreLoadedConfig({
           sourceConfigPath,
@@ -1268,6 +1298,7 @@ export async function patchCommand({
         return result;
       }
     });
+    await agentStream.endPhase('clean_base', 'success', { baseSha, headSha, branchName });
 
     info(
       `Base branch: ${cleanBaseResult.branch} | ${shortSha(cleanBaseResult.beforeSha)} -> ${shortSha(cleanBaseResult.afterSha)}`
@@ -1339,6 +1370,8 @@ export async function patchCommand({
     if (!anyScopeHadUpdates && scopes.length > 0) {
       success('No dependencies to update across all scopes.');
       status = 'up_to_date';
+      earlyExit = createEarlyExitReason('no_updates');
+      await agentStream.emitEarlyExit('no_updates', { branchName, baseBranch });
       await logRunEnd(run, 'up_to_date', { branchName, baseBranch, earlyExit: true });
       return true;
     }
@@ -1375,6 +1408,8 @@ export async function patchCommand({
     if (!(await hasStagedChanges(tempDir))) {
       success('All dependencies are already up to date. Nothing to patch.');
       status = 'up_to_date';
+      earlyExit = createEarlyExitReason('up_to_date');
+      await agentStream.emitEarlyExit('up_to_date', { branchName, baseBranch });
       await logRunEnd(run, 'up_to_date', { branchName, baseBranch });
       return true;
     }
@@ -1383,11 +1418,13 @@ export async function patchCommand({
       cwd: tempDir,
       quiet: true
     });
-    const stagedFiles = stagedFilesResult.stdout
+    stagedFiles = stagedFilesResult.stdout
       .split('\n')
       .map((line) => line.trim())
       .filter(Boolean);
     changedFilesCount = stagedFiles.length;
+
+    configStaged = stagedFiles.includes(configFileName);
 
     info(`Staged files (${changedFilesCount}):`);
     for (const stagedFile of stagedFiles) {
@@ -1418,6 +1455,7 @@ export async function patchCommand({
       return true;
     }
 
+    agentStream.startPhase('commit');
     await runPhase({
       run,
       phase: 'push',
@@ -1430,6 +1468,7 @@ export async function patchCommand({
           protectedBranches: config.protectedBranches
         });
         await commitChanges(tempDir, 'bridge: update dependencies (non-breaking)');
+        headSha = await getCurrentHeadSha(tempDir);
         await pushBridgeBranch(tempDir, {
           branchName,
           defaultBranch: baseBranch,
@@ -1438,10 +1477,12 @@ export async function patchCommand({
       },
       meta: { branchName, baseBranch }
     });
+    phaseTiming.commit = await agentStream.endPhase('commit', 'success', { headSha });
 
     const originUrl = await getOriginUrl(tempDir);
     compareUrl = getCompareUrl(originUrl || config.repoUrl, branchName);
 
+    agentStream.startPhase('pr');
     pullRequest = await createPullRequest({
       cwd: tempDir,
       branchName,
@@ -1453,10 +1494,15 @@ export async function patchCommand({
       runReportPath,
       options: config.pullRequest
     });
+    const prStatus = ['created', 'existing'].includes(pullRequest.status) ? 'success' : 'skipped';
+    phaseTiming.pr = await agentStream.endPhase('pr', prStatus, { 
+      prUrl: pullRequest.url,
+      prStatus: pullRequest.status 
+    });
     await logPhase(
       run,
       'pull_request',
-      ['created', 'existing'].includes(pullRequest.status) ? 'success' : 'skipped',
+      prStatus,
       {
         branchName,
         baseBranch,
@@ -1535,6 +1581,17 @@ export async function patchCommand({
     }
 
     try {
+      const finalConfigSha256 = await computeFileSha256(configPath);
+      configMutated = configFileSha256 !== '' && finalConfigSha256 !== configFileSha256;
+
+      await agentStream.emitConfigState(configPath, configFileSha256, configStaged, configMutated);
+      await agentStream.emitRunEnd(status, {
+        branchName,
+        baseBranch,
+        changedFilesCount,
+        earlyExit
+      });
+
       const savedReport = await writeRunReport({
         run,
         status,
@@ -1545,6 +1602,9 @@ export async function patchCommand({
         requestedScope,
         branchName,
         baseBranch,
+        baseSha,
+        headSha,
+        stagedFiles,
         changedFilesCount,
         dependencySummary: depDeltaSummary,
         auditResults,
@@ -1553,7 +1613,14 @@ export async function patchCommand({
         localPackages: runtimeLocalPackages,
         pullRequest,
         failure,
-        failurePath
+        failurePath,
+        configFileSha256,
+        configStaged,
+        configMutated,
+        earlyExit,
+        phaseTiming,
+        skippedCount,
+        blockedCount
       });
       runReportPath = savedReport.reportPath;
     } catch (reportError) {

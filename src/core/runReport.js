@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 import { getActivityLogPath, getBridgeHome } from './activityLogger.js';
+import { AGENT_TELEMETRY_SCHEMA_VERSION, getAgentEventStreamPath } from './agentTelemetry.js';
 import { redactActivityPayload, redactSensitiveText } from './redaction.js';
 
 export const RUN_REPORT_SCHEMA_VERSION = 'bridge-report.v1';
@@ -359,6 +360,9 @@ export async function writeRunReport({
   requestedScope = '',
   branchName = '',
   baseBranch = '',
+  baseSha = '',
+  headSha = '',
+  stagedFiles = [],
   changedFilesCount = 0,
   dependencySummary = null,
   auditResults = [],
@@ -367,7 +371,14 @@ export async function writeRunReport({
   localPackages = [],
   pullRequest = null,
   failure = null,
-  failurePath = ''
+  failurePath = '',
+  configFileSha256 = '',
+  configStaged = false,
+  configMutated = false,
+  earlyExit = null,
+  phaseTiming = {},
+  skippedCount = 0,
+  blockedCount = 0
 } = {}) {
   const events = await readRunEvents(run.runId);
   const finishedEvent = [...events].reverse().find((event) => event.event === 'run_finished');
@@ -383,8 +394,11 @@ export async function writeRunReport({
   const resolvedValidation = summarizeValidation(validationResults);
   const gateDecisions = collectGateDecisions(auditResults, validationResults);
 
+  const agentEventStreamPath = getAgentEventStreamPath(run.runId);
+
   const report = redactActivityPayload({
     schemaVersion: RUN_REPORT_SCHEMA_VERSION,
+    agentSchemaVersion: AGENT_TELEMETRY_SCHEMA_VERSION,
     generatedAt: new Date().toISOString(),
     run: {
       id: run.runId,
@@ -401,6 +415,19 @@ export async function writeRunReport({
       baseBranch,
       candidateBranch: branchName,
       scope: requestedScope || 'all'
+    },
+    git: {
+      baseBranch,
+      branchName,
+      baseSha: baseSha || '',
+      headSha: headSha || '',
+      stagedFiles: stagedFiles || []
+    },
+    config: {
+      path: configPath,
+      sha256: configFileSha256 || '',
+      staged: configStaged,
+      mutated: configMutated
     },
     execution: {
       dryRun,
@@ -419,12 +446,17 @@ export async function writeRunReport({
       validation: resolvedValidation,
       gateDecisions,
       pullRequest,
-      failure: commandFailureDetails(failure)
+      failure: commandFailureDetails(failure),
+      earlyExit: earlyExit || null,
+      skippedCount: skippedCount || 0,
+      blockedCount: blockedCount || 0
     },
+    phaseTiming: phaseTiming || {},
     phases: events
       .filter((event) => event.event === 'phase')
       .map(({ event, at, runId, command, ...phase }) => ({ at, ...phase })),
-    artifacts: collectArtifactPaths(events, failurePath)
+    artifacts: collectArtifactPaths(events, failurePath),
+    agentEventStream: agentEventStreamPath
   });
 
   const reportPath = getRunReportPath(run.runId);
