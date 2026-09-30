@@ -4,6 +4,7 @@ import path from 'node:path';
 import { getActivityLogPath, getBridgeHome } from './activityLogger.js';
 import { AGENT_TELEMETRY_SCHEMA_VERSION, getAgentEventStreamPath } from './agentTelemetry.js';
 import { redactActivityPayload, redactSensitiveText } from './redaction.js';
+import { formatValidationGateReason } from './scriptDiff.js';
 
 export const RUN_REPORT_SCHEMA_VERSION = 'bridge-report.v1';
 
@@ -333,16 +334,14 @@ function collectGateDecisions(auditResults, validationResults) {
         gate: 'validation',
         scope: validation.label || 'root',
         passed: false,
-        reason: `${validation.comparison.newFailureCount} new script failure(s)`
+        reason: formatValidationGateReason(validation.comparison)
       });
     } else {
       decisions.push({
         gate: 'validation',
         scope: validation.label || 'root',
         passed: true,
-        reason: validation.comparison?.hasBaselineNoise
-          ? 'Only baseline failures (unchanged)'
-          : 'All scripts passed'
+        reason: formatValidationGateReason(validation.comparison)
       });
     }
   }

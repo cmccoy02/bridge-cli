@@ -8,8 +8,17 @@ import {
   captureScriptResults,
   compareScriptResults,
   createScriptDiffReport,
-  formatScriptDiffSummary
+  evaluateScriptValidationGate,
+  formatBaselinePersistNotice,
+  formatNewFailureBlockMessage,
+  formatScriptDiffSummary,
+  formatValidationGateReason,
+  formatValidationPrLine
 } from '../src/core/scriptDiff.js';
+import {
+  describeScriptLifecycleOrder,
+  SCOPE_WORKFLOW_PHASE_ORDER
+} from '../src/core/scriptLifecycle.js';
 import {
   BLOCKING_SEVERITIES,
   compareAuditSnapshots,
@@ -130,8 +139,11 @@ test('scriptDiff: formats summary correctly', () => {
   const summary = formatScriptDiffSummary(comparison);
 
   assert.match(summary, /2 NEW failure/);
-  assert.match(summary, /1 baseline failure/);
-  assert.match(summary, /1 resolved/);
+  assert.match(summary, /introduced by the update \(blocking\)/);
+  assert.match(summary, /1 pre-existing baseline failure/);
+  assert.match(summary, /already present before the update; not blocking/);
+  assert.match(summary, /1 pre-existing failure\(s\) resolved/);
+  assert.doesNotMatch(summary, /persist \(not blocking\)/);
 });
 
 test('audit: severity-aware comparison detects blocking increases', () => {
@@ -404,4 +416,78 @@ test('audit: improvements are tracked when vulnerabilities decrease', () => {
   assert.equal(comparison.regressions, 0);
   assert.equal(comparison.regressed, false);
   assert.equal(comparison.blocked, false);
+});
+
+test('script lifecycle: beforeScripts run before update; afterScripts run after', () => {
+  const beforeIndex = SCOPE_WORKFLOW_PHASE_ORDER.indexOf('beforeScripts');
+  const updateIndex = SCOPE_WORKFLOW_PHASE_ORDER.indexOf('update');
+  const afterIndex = SCOPE_WORKFLOW_PHASE_ORDER.indexOf('afterScripts');
+  const baselineInstallIndex = SCOPE_WORKFLOW_PHASE_ORDER.indexOf('baseline_install');
+  const candidateIndex = SCOPE_WORKFLOW_PHASE_ORDER.indexOf('candidate_reinstall');
+
+  assert.ok(baselineInstallIndex < beforeIndex);
+  assert.ok(beforeIndex < updateIndex);
+  assert.ok(updateIndex < candidateIndex);
+  assert.ok(candidateIndex < afterIndex);
+
+  const observed = describeScriptLifecycleOrder([
+    'audit_before:root',
+    'baseline_lockfile:root',
+    'baseline_clean:root',
+    'baseline_install:root',
+    'beforeScripts:root',
+    'bundle_before:root',
+    'update:root',
+    'candidate_reinstall:root',
+    'audit_after:root',
+    'afterScripts:root',
+    'scriptDiff:root',
+    'bundle_after:root'
+  ]);
+
+  assert.equal(observed.beforeScriptsRunOnBaseline, true);
+  assert.equal(observed.afterScriptsRunOnCandidate, true);
+});
+
+test('script gate: new after-script failures block push/PR', () => {
+  const beforeResults = captureScriptResults([
+    { command: 'npm run lint', success: true, code: 0 }
+  ]);
+  const afterResults = captureScriptResults([
+    { command: 'npm run lint', success: false, code: 1 }
+  ]);
+  const comparison = compareScriptResults(beforeResults, afterResults);
+  const gate = evaluateScriptValidationGate(comparison, { label: 'root' });
+
+  assert.equal(gate.shouldBlock, true);
+  assert.equal(gate.allowPush, false);
+  assert.match(gate.blockingMessages[0], /NEW after-script failure introduced by the update/);
+  assert.match(gate.blockingMessages[0], /Stopping before push\/PR/);
+  assert.match(formatValidationGateReason(comparison), /blocking push\/PR/);
+  assert.match(formatValidationPrLine(comparison, 'root'), /NEW failure\(s\) introduced by the update/);
+});
+
+test('script gate: pre-existing baseline failures do not block push/PR', () => {
+  const beforeResults = captureScriptResults([
+    { command: 'npm run lint', success: false, code: 1 }
+  ]);
+  const afterResults = captureScriptResults([
+    { command: 'npm run lint', success: false, code: 1 }
+  ]);
+  const comparison = compareScriptResults(beforeResults, afterResults);
+  const gate = evaluateScriptValidationGate(comparison, { label: 'root' });
+
+  assert.equal(comparison.hasNewFailures, false);
+  assert.equal(comparison.hasBaselineNoise, true);
+  assert.equal(gate.shouldBlock, false);
+  assert.equal(gate.allowPush, true);
+  assert.equal(gate.blockingMessages.length, 0);
+  assert.match(gate.notices[0], /pre-existing baseline script failure/);
+  assert.match(gate.notices[0], /do not block push\/PR/);
+  assert.doesNotMatch(gate.notices[0], /persist \(not blocking\)/);
+  assert.doesNotMatch(formatBaselinePersistNotice('root', 1), /persist \(not blocking\)/);
+  assert.match(
+    formatNewFailureBlockMessage('root', { command: 'npm test', exitCode: 1 }),
+    /Stopping before push\/PR/
+  );
 });

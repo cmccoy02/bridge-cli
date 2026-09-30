@@ -104,6 +104,87 @@ export function compareScriptResults(beforeResults, afterResults) {
   };
 }
 
+export function formatNewFailureBlockMessage(label, failure) {
+  const command = failure?.command || '(unknown command)';
+  const exitCode = failure?.exitCode ?? failure?.code ?? '?';
+
+  return (
+    `${label}: NEW after-script failure introduced by the update: ${command} ` +
+    `(exit code ${exitCode}). This was not present on the committed baseline. ` +
+    `Stopping before push/PR.`
+  );
+}
+
+export function formatBaselinePersistNotice(label, count) {
+  return (
+    `${label}: ${count} pre-existing baseline script failure(s) were already present ` +
+    `before the update. These are not new regressions and do not block push/PR.`
+  );
+}
+
+export function formatBeforeScriptsBaselineNotice(count) {
+  return (
+    `Before-scripts recorded ${count} failure(s) on the committed baseline. ` +
+    `Pre-existing failures are not blocking; only NEW failures after the update stop push/PR.`
+  );
+}
+
+export function formatResolvedFailuresNotice(label, count) {
+  return `${label}: ${count} pre-existing baseline script failure(s) now pass after the update.`;
+}
+
+export function formatValidationGateReason(comparison) {
+  if (comparison?.hasNewFailures) {
+    return `${comparison.newFailureCount} NEW script failure(s) introduced by the update (blocking push/PR)`;
+  }
+
+  if (comparison?.hasBaselineNoise) {
+    return 'Pre-existing baseline failures only (already present before the update; not blocking)';
+  }
+
+  return 'All scripts passed';
+}
+
+export function formatValidationPrLine(comparison, scopeLabel) {
+  if (comparison?.hasNewFailures) {
+    return `- **${scopeLabel}:** ❌ ${comparison.newFailureCount} NEW failure(s) introduced by the update (blocking)`;
+  }
+
+  if (comparison?.hasBaselineNoise) {
+    return `- **${scopeLabel}:** ⚠️ ${comparison.baselineFailureCount} pre-existing baseline failure(s) (already present before the update; not blocking)`;
+  }
+
+  return `- **${scopeLabel}:** ✅ all scripts passed`;
+}
+
+export function evaluateScriptValidationGate(comparison, { label = 'root' } = {}) {
+  const blockingMessages = [];
+  const notices = [];
+
+  if (comparison?.hasNewFailures) {
+    for (const failure of comparison.newFailures || []) {
+      blockingMessages.push(formatNewFailureBlockMessage(label, failure));
+    }
+  }
+
+  if (comparison?.hasBaselineNoise) {
+    notices.push(
+      formatBaselinePersistNotice(label, comparison.baselineFailureCount)
+    );
+  }
+
+  if ((comparison?.resolvedCount || 0) > 0) {
+    notices.push(formatResolvedFailuresNotice(label, comparison.resolvedCount));
+  }
+
+  return {
+    shouldBlock: blockingMessages.length > 0,
+    allowPush: blockingMessages.length === 0,
+    blockingMessages,
+    notices
+  };
+}
+
 export function formatScriptDiffSummary(comparison) {
   if (!comparison) {
     return 'Script validation: not available';
@@ -112,15 +193,19 @@ export function formatScriptDiffSummary(comparison) {
   const parts = [];
 
   if (comparison.newFailureCount > 0) {
-    parts.push(`${comparison.newFailureCount} NEW failure(s)`);
+    parts.push(
+      `${comparison.newFailureCount} NEW failure(s) introduced by the update (blocking)`
+    );
   }
 
   if (comparison.baselineFailureCount > 0) {
-    parts.push(`${comparison.baselineFailureCount} baseline failure(s) (unchanged)`);
+    parts.push(
+      `${comparison.baselineFailureCount} pre-existing baseline failure(s) (already present before the update; not blocking)`
+    );
   }
 
   if (comparison.resolvedCount > 0) {
-    parts.push(`${comparison.resolvedCount} resolved`);
+    parts.push(`${comparison.resolvedCount} pre-existing failure(s) resolved`);
   }
 
   if (parts.length === 0) {
