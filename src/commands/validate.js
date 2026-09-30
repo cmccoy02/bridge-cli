@@ -50,6 +50,36 @@ function commandList(value) {
   return value.filter((entry) => typeof entry === 'string' && entry.trim().length > 0);
 }
 
+export function collectDisabledGateNotices(config) {
+  const notices = [];
+  const managerPreset = PACKAGE_MANAGER_PRESETS[config?.packageManager] || null;
+
+  if (managerPreset && !managerPreset.lockfileFormat) {
+    notices.push(
+      `Lockfile metrics and the direct-major gate are inactive for ${config.packageManager}: Bridge cannot parse this lockfile format.`
+    );
+  }
+
+  if (!config?.auditCommand) {
+    notices.push(
+      'Security audit is inactive: auditCommand is empty. Set auditCommand (for example `pnpm audit --json`) to enable the vulnerability gate.'
+    );
+  }
+
+  const beforeSet = new Set(commandList(config?.beforeScripts));
+  const afterOnlyScripts = commandList(config?.afterScripts).filter(
+    (commandText) => !beforeSet.has(commandText)
+  );
+
+  if (afterOnlyScripts.length > 0) {
+    notices.push(
+      `afterScripts includes command(s) not in beforeScripts (${afterOnlyScripts.join(', ')}). Failures in those commands cannot be compared to a committed baseline.`
+    );
+  }
+
+  return notices;
+}
+
 async function checkNpmVersion() {
   const result = await runCommand('npm --version', {
     allowFailure: true,
@@ -145,6 +175,8 @@ export async function validateCommand({
     for (const afterScript of commandList(config.afterScripts)) {
       await ensureBinary(afterScript, 'afterScripts', issues);
     }
+
+    notices.push(...collectDisabledGateNotices(config));
 
     if (Array.isArray(config.scopes)) {
       for (const scope of config.scopes) {
