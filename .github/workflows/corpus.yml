@@ -1,0 +1,83 @@
+name: Bridge Corpus
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Run weekdays at 06:00 UTC
+    - cron: '0 6 * * 1-5'
+  pull_request:
+    paths:
+      - 'corpus/**'
+      - '.github/workflows/corpus.yml'
+
+# Never push to external remotes - this workflow is read-only
+permissions:
+  contents: read
+
+jobs:
+  run-corpus:
+    name: Run Corpus Fixtures
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install Bridge CLI dependencies
+        run: npm ci
+
+      - name: Setup fixture git repos
+        run: node corpus/scripts/setup-fixtures.mjs
+
+      - name: Install fixture dependencies
+        run: |
+          for fixture in corpus/fixtures/*/; do
+            if [ -d "$fixture" ] && [ "$(basename "$fixture")" != ".remotes" ]; then
+              echo "Installing deps for $fixture"
+              (cd "$fixture" && npm ci --ignore-scripts)
+            fi
+          done
+
+      - name: Run corpus fixtures
+        id: corpus
+        run: node corpus/scripts/run-all.mjs
+        continue-on-error: true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: corpus-artifacts
+          path: corpus/artifacts/
+          retention-days: 14
+
+      - name: Upload scoreboard
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: corpus-scoreboard
+          path: corpus/artifacts/scoreboard.json
+          retention-days: 30
+
+      - name: Print scoreboard summary
+        if: always()
+        run: |
+          if [ -f corpus/artifacts/scoreboard.json ]; then
+            echo "### Corpus Scoreboard" >> $GITHUB_STEP_SUMMARY
+            echo '```json' >> $GITHUB_STEP_SUMMARY
+            cat corpus/artifacts/scoreboard.json | jq '.summary' >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Check for failures
+        if: steps.corpus.outcome == 'failure'
+        run: |
+          echo "::warning::Some corpus fixtures failed. Check artifacts for details."
+          exit 0

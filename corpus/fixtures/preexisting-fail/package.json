@@ -1,0 +1,13 @@
+{
+  "name": "corpus-preexisting-fail",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Fixture: intentionally failing script before+after (baseline noise)",
+  "scripts": {
+    "lint": "exit 0",
+    "test": "echo 'known-failure: this script always fails' && exit 1"
+  },
+  "dependencies": {
+    "semver": "^7.5.0"
+  }
+}

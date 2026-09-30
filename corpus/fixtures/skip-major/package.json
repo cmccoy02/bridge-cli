@@ -1,0 +1,13 @@
+{
+  "name": "corpus-skip-major",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Fixture: minor update available, tests policy boundary",
+  "scripts": {
+    "lint": "exit 0",
+    "test": "exit 0"
+  },
+  "dependencies": {
+    "ms": "^2.1.2"
+  }
+}

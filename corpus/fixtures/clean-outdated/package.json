@@ -1,0 +1,13 @@
+{
+  "name": "corpus-clean-outdated",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Fixture: intentionally outdated dep to test patch flow",
+  "scripts": {
+    "lint": "exit 0",
+    "test": "exit 0"
+  },
+  "dependencies": {
+    "semver": "^7.5.0"
+  }
+}
