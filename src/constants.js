@@ -151,6 +151,7 @@ export const DEFAULT_CONFIG = {
   cleanCommands: [...PACKAGE_MANAGER_PRESETS.npm.cleanCommands],
   beforeScripts: [],
   afterScripts: [],
+  skipBeforeScripts: false,
   auditCommand: PACKAGE_MANAGER_PRESETS.npm.auditCommand,
   blockOnNewVulnerabilities: true,
   blockOnBaselineFailures: false,

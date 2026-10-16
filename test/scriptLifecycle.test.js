@@ -252,6 +252,146 @@ test('pre-existing baseline failures do not block push and are not called persis
   assert.match(await listRemoteBridgeBranches(repoDir), /refs\/heads\/bridge\/test-/);
 });
 
+test('end-of-run summary table is printed and written to the run folder', async (t) => {
+  const { repoDir, defaultBranch } = await createRepoWithOrigin(t);
+  const bridgeHome = await makeTempDir(t);
+
+  await writePatchFixture(repoDir, {
+    defaultBranch,
+    beforeScripts: [
+      'node -e "const p=require(\'./package-lock.json\'); if (p.packages[\'node_modules/example\'].version !== \'1.0.0\') process.exit(1)"'
+    ],
+    afterScripts: [
+      'node -e "const p=require(\'./package-lock.json\'); if (p.packages[\'node_modules/example\'].version !== \'1.0.1\') process.exit(1)"',
+      'node -e "process.exit(0)"'
+    ]
+  });
+
+  const result = await runPatch(repoDir, bridgeHome);
+  const output = `${result.stdout}\n${result.stderr}`;
+  const runsDir = path.join(bridgeHome, 'runs');
+  const runDirs = (await fs.readdir(runsDir)).filter((name) => name.startsWith('patch-'));
+  const report = JSON.parse(
+    await fs.readFile(path.join(runsDir, runDirs[0], 'bridge-report.v1.json'), 'utf8')
+  );
+  const summary = await fs.readFile(
+    path.join(runsDir, runDirs[0], 'bridge-summary.md'),
+    'utf8'
+  );
+  const scriptLogs = await fs.readdir(path.join(runsDir, runDirs[0], 'scripts'));
+
+  assert.equal(result.success, true, output);
+  assert.match(output, /After-script summary/);
+  assert.match(output, /Result/);
+  assert.match(output, /Failure/);
+  assert.equal(report.outcome.scriptSummary.scripts.length, 2);
+  assert.equal(report.outcome.scriptSummary.scripts[0].result, 'pass');
+  assert.ok(report.outcome.scriptSummary.scripts[0].logPath);
+  assert.match(summary, /# Bridge after-script summary/);
+  assert.ok(scriptLogs.length >= 2);
+});
+
+test('skipBeforeScripts does not run beforeScripts and still compares afterScripts to baseline', async (t) => {
+  const { repoDir, defaultBranch } = await createRepoWithOrigin(t);
+  const bridgeHome = await makeTempDir(t);
+
+  await writePatchFixture(repoDir, {
+    defaultBranch,
+    beforeScripts: ['node -e "throw new Error(\'before-script-should-not-run\')"'],
+    afterScripts: [
+      'node -e "const p=require(\'./package-lock.json\'); if (p.packages[\'node_modules/example\'].version !== \'1.0.1\') process.exit(1)"'
+    ],
+    extraConfig: { skipBeforeScripts: true }
+  });
+
+  const result = await runPatch(repoDir, bridgeHome, '--skip-before-scripts');
+  const output = `${result.stdout}\n${result.stderr}`;
+  const phases = await readActivityPhases(bridgeHome);
+  const log = await fs.readFile(path.join(bridgeHome, 'logs', 'operations.log'), 'utf8');
+
+  assert.equal(result.success, true, output);
+  assert.doesNotMatch(output, /before-script-should-not-run/);
+  assert.match(log, /"reason":"skipBeforeScripts"/);
+  assert.ok(phases.some((phase) => phase.startsWith('beforeScripts')));
+  assert.ok(phases.some((phase) => phase.startsWith('baselineScripts')));
+  assert.ok(phases.some((phase) => phase.startsWith('afterScripts')));
+  assert.match(output, /skipBeforeScripts is on/);
+  assert.match(output, /After-script summary/);
+});
+
+test('skipBeforeScripts still treats pre-existing after-script failures as baseline', async (t) => {
+  const { repoDir, defaultBranch } = await createRepoWithOrigin(t);
+  const bridgeHome = await makeTempDir(t);
+  const failingScript =
+    'node -e "const p=require(\'./package-lock.json\'); if (p.packages[\'node_modules/example\']) process.exit(1)"';
+
+  await writePatchFixture(repoDir, {
+    defaultBranch,
+    beforeScripts: ['node -e "process.exit(0)"'],
+    afterScripts: [failingScript],
+    extraConfig: { skipBeforeScripts: true }
+  });
+
+  const result = await runPatch(repoDir, bridgeHome, '--skip-before-scripts');
+  const output = `${result.stdout}\n${result.stderr}`;
+
+  assert.equal(result.success, true, output);
+  assert.match(output, /already present/);
+  assert.doesNotMatch(output, /NEW after-script failure introduced by the update/);
+  assert.match(await listRemoteBridgeBranches(repoDir), /refs\/heads\/bridge\/test-/);
+});
+
+test('skipBeforeScripts still hard-stops on a new after-script failure', async (t) => {
+  const { repoDir, defaultBranch } = await createRepoWithOrigin(t);
+  const bridgeHome = await makeTempDir(t);
+
+  await writePatchFixture(repoDir, {
+    defaultBranch,
+    beforeScripts: ['node -e "process.exit(0)"'],
+    afterScripts: [
+      'node -e "const p=require(\'./package-lock.json\'); if (p.packages[\'node_modules/example\'].version !== \'1.0.0\') process.exit(1)"'
+    ],
+    extraConfig: { skipBeforeScripts: true }
+  });
+
+  const result = await runPatch(repoDir, bridgeHome, '--skip-before-scripts');
+  const output = `${result.stdout}\n${result.stderr}`;
+
+  assert.equal(result.success, false);
+  assert.match(output, /NEW after-script failure introduced by the update/);
+  assert.match(output, /Stopping before push\/PR/);
+  assert.equal(await listRemoteBridgeBranches(repoDir), '');
+});
+
+test('baseline install happens before script measurement so node_modules exists', async (t) => {
+  const { repoDir, defaultBranch } = await createRepoWithOrigin(t);
+  const bridgeHome = await makeTempDir(t);
+
+  await writePatchFixture(repoDir, {
+    defaultBranch,
+    beforeScripts: [
+      'node -e "const fs=require(\'fs\'); if (!fs.existsSync(\'package-lock.json\')) process.exit(2)"'
+    ],
+    afterScripts: [
+      'node -e "const fs=require(\'fs\'); if (!fs.existsSync(\'package-lock.json\')) process.exit(2)"'
+    ],
+    extraConfig: {
+      cleanCommands: ['rm -rf node_modules', 'rm -f package-lock.json'],
+      installCommand:
+        'node -e "const fs=require(\'fs\'); fs.mkdirSync(\'node_modules\',{recursive:true}); if (!fs.existsSync(\'package-lock.json\')) process.exit(3)"'
+    }
+  });
+
+  const result = await runPatch(repoDir, bridgeHome);
+  const phases = await readActivityPhases(bridgeHome);
+  const order = describeScriptLifecycleOrder(phases);
+
+  assert.equal(result.success, true, `${result.stdout}\n${result.stderr}`);
+  assert.ok(order.baselineInstallIndex !== -1);
+  assert.ok(order.baselineInstallIndex < order.beforeScriptsIndex);
+  assert.ok(order.beforeScriptsRunOnBaseline);
+});
+
 test('blockOnBaselineFailures stops after the baseline and before the update', async (t) => {
   const { repoDir, defaultBranch } = await createRepoWithOrigin(t);
   const bridgeHome = await makeTempDir(t);

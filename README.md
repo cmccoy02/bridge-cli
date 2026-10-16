@@ -103,6 +103,7 @@ Runs the patch engine end-to-end:
 - Install the committed lockfile baseline, then run `beforeScripts`
 - Update dependencies and install the candidate tree, then run `afterScripts`
 - Diff before vs after: only NEW after-script failures block push/PR, including new error output inside a command that already failed on the baseline. Time-varying noise (`Start at HH:MM:SS`, TAP `duration_ms`, ISO timestamps, pids) is normalized so pre-existing failing vitest/node:test suites do not false-positive
+- Print a compact after-script table at the end of every run (name, pass/fail, new vs baseline, duration, full log path) and write the same rows to `bridge-report.v1.json` plus `bridge-summary.md`
 - Hide untracked `bridge.config.json` from the isolated workspace so repo lint/format scripts do not fail on Bridge's own config
 - Stage only dependency manifests and lockfiles, never paths under `node_modules/`
 - Reject direct major-version changes, new vulnerabilities, and configured bundle regressions (npm, pnpm, and yarn lockfiles). Yarn classic lockfiles are keyed by package name, so a range rewrite such as `semver@^6` → `semver@^7` is a major bump
@@ -129,6 +130,10 @@ bridge patch --dry-run --verbose --keep-workspace
 
 # Treat baseline script failures as blocking instead of noise.
 bridge patch --block-on-baseline-failures
+
+# Skip configured beforeScripts; capture baseline by running afterScripts
+# on the committed lockfile tree (reversible; default remains off).
+bridge patch --skip-before-scripts
 
 # Exercise one declared service without running every configured scope.
 bridge patch --dry-run --scope deploy/description_bot
@@ -184,6 +189,8 @@ Bridge also writes local operation logs to:
 Each `bridge patch` run additionally writes:
 
 - `~/.bridge/runs/<run-id>/bridge-report.v1.json` — main run report with outcomes
+- `~/.bridge/runs/<run-id>/bridge-summary.md` — compact after-script table for humans and scheduled runs
+- `~/.bridge/runs/<run-id>/scripts/*.log` — full redacted stdout/stderr for each validation script
 - `~/.bridge/runs/<run-id>/bridge-agent.v1.jsonl` — append-only event stream for agent consumption
 - `~/.bridge/runs/<run-id>/failure.log` when a command fails
 - `~/.bridge/artifacts/<run-id>/...` for Visualizer reports
@@ -280,6 +287,7 @@ File: `bridge.config.json` (or `.bridge.config.json`)
   ],
   "beforeScripts": [],
   "afterScripts": [],
+  "skipBeforeScripts": false,
   "auditCommand": "npm audit --package-lock-only --json",
   "blockOnNewVulnerabilities": true,
   "blockOnBaselineFailures": false,
@@ -308,6 +316,7 @@ Optional fields:
 - `name`
 - `beforeScripts`
 - `afterScripts`
+- `skipBeforeScripts` (defaults to `false`; when `true`, configured `beforeScripts` do not run and Bridge captures the baseline by running `afterScripts` on the committed lockfile tree. CLI: `--skip-before-scripts` / `--run-before-scripts`)
 - `auditCommand` (npm defaults to `npm audit --package-lock-only --json`; pnpm to `pnpm audit --json`; yarn to `yarn audit --json`)
 - `blockOnNewVulnerabilities` (defaults to `true`)
 - `blockOnBaselineFailures` (defaults to `false`; when true, pre-existing baseline script failures stop the run after the baseline, before the update)
@@ -337,7 +346,8 @@ Notes:
 - If `bridge.config.json` is already tracked, Bridge leaves your local copy in place.
 - Visualizer HTML reports are copied to `~/.bridge/artifacts/<run-id>/<scope>/` and are not added to the patch.
 - `beforeScripts` execute against the committed-lockfile baseline after install-as-needed, and before any update/candidate mutation. `afterScripts` execute after the candidate is installed. Only NEW after-script failures block push/PR. That includes new error lines inside a command that already failed on the baseline. Pre-existing identical baseline failures are reported as already-present and non-blocking unless `blockOnBaselineFailures` is enabled. A command that appears only in `afterScripts` is described as not measured on the baseline, not as "introduced by the update".
-- When clean commands remove a supported lockfile, Bridge restores the committed baseline before the before scripts and restores the candidate lockfile before the after scripts. This prevents `npm install` from resolving an updated dependency tree on both sides of the comparison.
+- `skipBeforeScripts: true` (or `--skip-before-scripts`) leaves the before-script code path in place but does not execute `beforeScripts`. Comparison still works because Bridge runs the after-script suite on the committed lockfile tree as the baseline, then again on the candidate. Default is `false` so PRs that established before-on-baseline behavior stay unchanged unless you opt in.
+- When clean commands remove a supported lockfile, Bridge restores the committed baseline before the before scripts (or the skipped-before baseline capture) and restores the candidate lockfile before the after scripts. This prevents `npm install` from resolving an updated dependency tree on both sides of the comparison.
 - npm, pnpm, and yarn lockfiles are parsed for dependency deltas and the direct-major gate. Yarn classic entries are aggregated by package name. `bridge doctor` warns when a lockfile format cannot be parsed or when no audit command is configured *and* the package manager has no default. Empty `auditCommand` on npm/pnpm/yarn still runs the default audit during `bridge patch`.
 - `bridge --version` prints `0.1.0 (<git sha>)` from a git checkout.
 - When a run is blocked, `failure.log` includes the failing command's stdout and stderr, the report records `validation` / `gateDecisions` / `blockedCount`, and the terminal prints a short excerpt of failing lines (both streams).
@@ -568,11 +578,11 @@ Bridge is intentionally simple and deterministic:
 2. Copy repo into an isolated temp directory
 3. Fetch origin, check out/pull the default branch, and create a Bridge branch
 4. Install a reproducible before-update baseline from the committed lockfile
-5. Run `beforeScripts` on that baseline, then the optional Visualizer baseline
+5. Run `beforeScripts` on that baseline (unless `skipBeforeScripts` / `--skip-before-scripts`, in which case the after-script suite is the baseline measurement), then the optional Visualizer baseline
 6. Update dependencies and install the candidate tree
 7. Run `afterScripts`, then the optional Visualizer candidate build
 8. Compare dependency, vulnerability, bundle, and validation results — NEW after-script failures stop before push/PR
-9. Write a redacted report and failure evidence for the local run
+9. Write a redacted report, compact after-script summary, per-script logs, and failure evidence for the local run
 10. Commit/push through the protected-branch guard, then create a PR when existing GitHub API credentials are available
 11. Cleanup temp directory and any first-init local config copy
 
@@ -585,3 +595,91 @@ Dependency maintenance is necessary but repetitive. Bridge removes the manual ch
 - No local workspace risk
 - No ecosystem-specific branching in the engine
 - One config pattern for Node, Python, Elixir, and more
+
+## Compact after-script summary
+
+Noisy lint/test/build logs stay in per-script files. Every `bridge patch` run ends with a CI-style table:
+
+```
+After-script summary
+Script         Result  Failure   Duration  Log
+npm run lint   pass    —         1.2s      ~/.bridge/runs/<run-id>/scripts/afterscripts-root-01-npm-run-lint.log
+npm run test   fail    new       4.8s      ~/.bridge/runs/<run-id>/scripts/afterscripts-root-02-npm-run-test.log
+npm run build  fail    baseline  12.1s     ~/.bridge/runs/<run-id>/scripts/afterscripts-root-03-npm-run-build.log
+```
+
+`Failure` is `new` (blocks push/PR), `baseline` (already present; not blocking unless `blockOnBaselineFailures`), `unmeasured` (after-only command, no baseline row), or `—` (passed). The same rows are in `outcome.scriptSummary` of `bridge-report.v1.json` and in `bridge-summary.md`. Scheduled runs can copy that markdown file. This is result capture only — no adoption tracking yet.
+
+```bash
+bridge patch --dry-run
+bridge report --latest
+```
+
+## Daily scheduler prototype
+
+`scripts/bridge-daily.sh` is a lockfile-guarded wrapper: fetch/pull (or clone) a target repo, run `bridge patch` with the after-script suite, copy `bridge-summary.md` to a dated folder. No daemon, no cloud scheduler, no extra npm dependencies. It exits `2` if another run holds the lock, `3` on usage errors, and Bridge's own non-zero status on a failed patch. It never force-pushes a PR; the normal gates still apply.
+
+The wrapper defaults to `--skip-before-scripts` so an unattended daily run matches the temporary "strip before-scripts" path. Pass `--run-before-scripts` to keep the configured before-script list.
+
+```bash
+# One-shot from this checkout (clones or updates ~/.bridge/schedule/repos/<name>):
+scripts/bridge-daily.sh --repo git@github.com:travelpassgroup/travelpass.com.git --branch main
+
+# Point at an existing clean checkout (fast-forward only; refuses a dirty tree):
+scripts/bridge-daily.sh --repo /Users/connormccoy/CODE/travelpass.com --run-before-scripts
+
+# Simulate without commit/push:
+scripts/bridge-daily.sh --repo /path/to/repo --dry-run
+```
+
+Dated copies land in `~/.bridge/schedule/summaries/<repo>/<UTC-timestamp>/`.
+
+### macOS launchd (primary)
+
+1. `mkdir -p ~/.bridge/schedule/logs`
+2. Copy `scripts/schedule/com.bridge.daily.plist.example` to `~/Library/LaunchAgents/com.bridge.daily.plist`
+3. Replace `REPLACE_*` values (this repo path, the target git URL, `$HOME`)
+4. Load it:
+
+```bash
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.bridge.daily.plist
+launchctl enable gui/$(id -u)/com.bridge.daily
+# Optional immediate run:
+launchctl kickstart -k gui/$(id -u)/com.bridge.daily
+```
+
+The example fires daily at 07:30 local time. The Mac must be awake. To unload: `launchctl bootout gui/$(id -u)/com.bridge.daily`.
+
+### Linux cron
+
+See `scripts/schedule/crontab.example`. After `crontab -e`:
+
+```
+30 7 * * * /bin/bash /path/to/bridge-cli/scripts/bridge-daily.sh --repo git@github.com:org/app.git --branch main >> $HOME/.bridge/schedule/logs/daily.log 2>&1
+```
+
+## Isolated-workspace gotchas
+
+### node_modules / clean / install sequencing
+
+Verified in the current `bridge patch` order (not a guess):
+
+1. Copy into the temp workspace **excludes** `node_modules` (and venvs). The developer's local install is never the baseline.
+2. `cleanCommands` (typically `rm -rf node_modules`) run next. On a fresh copy this is usually a no-op; it matters when a previous step created `node_modules`.
+3. If clean deleted a supported lockfile, Bridge restores the **committed** lockfile before install.
+4. `installCommand` installs that committed lockfile. Baseline scripts therefore see a clean install of HEAD, not a leftover tree.
+5. If install rewrote the lockfile, Bridge restores the committed bytes again so the update starts from HEAD.
+6. `beforeScripts` run here — after that install — unless skipped. When skipped, the **after-script suite** runs at this same point as the baseline measurement.
+7. Update mutates the lockfile / `node_modules`.
+8. Candidate clean + restore of the **updated** lockfile + install, then `afterScripts`.
+
+Edge cases that are still easy to get wrong (documented, not changed here):
+
+- Capturing a script baseline *before* step 4 produces false failures (no `node_modules`) or measures the wrong tree. That is the historical sequencing bug; current code installs first.
+- Putting `rm -rf node_modules` in `beforeScripts` themselves leaves later baseline scripts and the Visualizer on an empty tree.
+- `audit_before` still runs *before* the baseline install. That is fine for `npm audit --package-lock-only`. A live `npm audit` that needs `node_modules` can look empty on the before side.
+- `skipBeforeScripts` avoids a second script list that can mutate the tree between baseline install and update. Comparison stays valid because the after-script suite is what gets measured on both sides.
+
+### Pre-commit hooks (lefthook, husky, …)
+
+Git hooks copied into the isolated workspace do not reliably run the same way as on a normal laptop checkout. The temp tree starts without `node_modules`; hooks that call `npx lefthook`, `./node_modules/.bin/lefthook`, or a `prepare`-installed husky shim only work if `installCommand` actually installs those packages and runs lifecycle scripts. `npm ci --ignore-scripts`, a no-op install, or a hook path that assumes the consumer's global toolchain will silently skip. Bridge treats this as a consumer-owned concern: keep required checks in `afterScripts` (and CI), not only in pre-commit.

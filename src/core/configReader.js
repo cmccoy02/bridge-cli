@@ -79,6 +79,8 @@ function normalizeScope(scope) {
     cleanCommands: normalizeArray(scope.cleanCommands),
     beforeScripts: normalizeArray(scope.beforeScripts),
     afterScripts: normalizeArray(scope.afterScripts),
+    skipBeforeScripts:
+      typeof scope.skipBeforeScripts === 'boolean' ? scope.skipBeforeScripts : undefined,
     auditCommand:
       typeof scope.auditCommand === 'string' ? scope.auditCommand.trim() : '',
     blockOnNewVulnerabilities:
@@ -243,6 +245,10 @@ function findShapeIssues(config) {
     issues.push('afterScripts must be an array of shell commands');
   }
 
+  if ('skipBeforeScripts' in config && typeof config.skipBeforeScripts !== 'boolean') {
+    issues.push('skipBeforeScripts must be true or false');
+  }
+
   if ('auditCommand' in config && typeof config.auditCommand !== 'string') {
     issues.push('auditCommand must be a shell command string');
   }
@@ -332,6 +338,13 @@ function findShapeIssues(config) {
           issues.push(`scopes[${index}].afterScripts must be an array`);
         }
 
+        if (
+          'skipBeforeScripts' in scope &&
+          typeof scope.skipBeforeScripts !== 'boolean'
+        ) {
+          issues.push(`scopes[${index}].skipBeforeScripts must be true or false`);
+        }
+
         if ('auditCommand' in scope && typeof scope.auditCommand !== 'string') {
           issues.push(`scopes[${index}].auditCommand must be a string`);
         }
@@ -408,6 +421,7 @@ export function normalizeConfig(config) {
     cleanCommands: normalizeArray(config.cleanCommands),
     beforeScripts: normalizeArray(config.beforeScripts),
     afterScripts: normalizeArray(config.afterScripts),
+    skipBeforeScripts: config.skipBeforeScripts === true,
     auditCommand:
       typeof config.auditCommand === 'string' ? config.auditCommand.trim() : '',
     blockOnNewVulnerabilities:

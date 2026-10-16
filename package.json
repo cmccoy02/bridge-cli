@@ -11,6 +11,8 @@
     "bin",
     "src",
     "templates",
+    "scripts/bridge-daily.sh",
+    "scripts/schedule",
     "README.md",
     "LICENSE"
   ],

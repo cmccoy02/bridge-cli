@@ -2,7 +2,8 @@
  * Documented scope-workflow order for `bridge patch`.
  *
  * 1. Establish a faithful baseline from the committed lockfile (install as needed).
- * 2. Run beforeScripts on that baseline before any update/candidate mutation.
+ * 2. Run beforeScripts on that baseline before any update/candidate mutation
+ *    (or skip them and capture baseline via afterScripts when skipBeforeScripts).
  * 3. Perform the dependency update and candidate install.
  * 4. Run afterScripts on the candidate tree.
  * 5. Diff before vs after — only NEW failures block push/PR.
@@ -13,6 +14,7 @@ export const SCOPE_WORKFLOW_PHASE_ORDER = [
   'baseline_clean',
   'baseline_install',
   'beforeScripts',
+  'baselineScripts',
   'bundle_before',
   'update',
   'candidate_reinstall',

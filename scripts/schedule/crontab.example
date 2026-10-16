@@ -1,0 +1,17 @@
+# Linux cron example — once daily at 07:30 local time.
+#
+# crontab -e
+# mkdir -p ~/.bridge/schedule/logs
+#
+# PATH must include node, git, and `bridge` (or rely on the wrapper's
+# fallback to this repo's bin/bridge.js). The wrapper lockfile prevents
+# overlapping runs if a previous job is still going.
+
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin
+BRIDGE_HOME=/home/REPLACE_USER/.bridge
+
+30 7 * * * /bin/bash REPLACE_PATH_TO_BRIDGE_CLI/scripts/bridge-daily.sh --repo REPLACE_GIT_URL_OR_CHECKOUT --branch main >> $BRIDGE_HOME/schedule/logs/daily.log 2>&1
+
+# Every 12 hours instead of daily:
+# 30 7,19 * * * /bin/bash REPLACE_PATH_TO_BRIDGE_CLI/scripts/bridge-daily.sh --repo REPLACE_GIT_URL_OR_CHECKOUT --branch main >> $BRIDGE_HOME/schedule/logs/daily.log 2>&1

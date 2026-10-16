@@ -40,6 +40,7 @@ export function captureScriptResults(results) {
     durationMs: result.durationMs || 0,
     stdout: result.stdout || '',
     stderr: result.stderr || '',
+    logPath: result.logPath || '',
     fingerprint: createScriptFingerprint(result)
   }));
 }
