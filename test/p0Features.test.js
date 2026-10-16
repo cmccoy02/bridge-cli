@@ -9,7 +9,9 @@ import {
   compareScriptResults,
   createScriptDiffReport,
   evaluateScriptValidationGate,
+  formatBaselineBlockNotice,
   formatBaselinePersistNotice,
+  formatBeforeScriptsBaselineNotice,
   formatNewFailureBlockMessage,
   formatScriptDiffSummary,
   formatValidationGateReason,
@@ -590,6 +592,104 @@ test('scriptDiff: unstructured output change is treated as a new failure (conser
   assert.equal(comparison.newFailures[0].conservativeMatch, true);
 });
 
+test('scriptDiff: vitest Start at clock noise is not a new failure', () => {
+  const before = [
+    ' RUN  v3.2.0 /tmp/bridge-a',
+    ' ❯ src/always-fail.test.ts (1)',
+    '   × adds numbers 2ms',
+    '     → expected 2 to be 3',
+    '   Start at  16:01:24',
+    '   Duration  791ms (transform 12ms, setup 0ms)'
+  ].join('\n');
+  const after = [
+    ' RUN  v3.2.0 /tmp/bridge-b',
+    ' ❯ src/always-fail.test.ts (1)',
+    '   × adds numbers 5ms',
+    '     → expected 2 to be 3',
+    '   Start at  16:02:01',
+    '   Duration  812ms (transform 14ms, setup 0ms)'
+  ].join('\n');
+
+  const comparison = compareScriptResults(
+    captureScriptResults([{ command: 'npm test -- --run', success: false, code: 1, stdout: before }]),
+    captureScriptResults([{ command: 'npm test -- --run', success: false, code: 1, stdout: after }])
+  );
+
+  assert.equal(comparison.hasNewFailures, false);
+  assert.equal(comparison.hasBaselineNoise, true);
+});
+
+test('scriptDiff: node:test duration_ms noise is not a new failure', () => {
+  const before = [
+    'TAP version 13',
+    '1..1',
+    'not ok 1 adds numbers',
+    '  ---',
+    '  duration_ms: 3.331321',
+    '  type: \'test\'',
+    '  ...',
+    '# tests 1',
+    '# fail 1',
+    '# duration 12.4ms'
+  ].join('\n');
+  const after = [
+    'TAP version 13',
+    '1..1',
+    'not ok 1 adds numbers',
+    '  ---',
+    '  duration_ms: 4.8821',
+    '  type: \'test\'',
+    '  ...',
+    '# tests 1',
+    '# fail 1',
+    '# duration 18.1ms'
+  ].join('\n');
+
+  const comparison = compareScriptResults(
+    captureScriptResults([{ command: 'npm test', success: false, code: 1, stdout: before }]),
+    captureScriptResults([{ command: 'npm test', success: false, code: 1, stdout: after }])
+  );
+
+  assert.equal(comparison.hasNewFailures, false);
+  assert.equal(comparison.hasBaselineNoise, true);
+});
+
+test('scriptDiff: ISO timestamps and pids in an error are not a new failure', () => {
+  const before = 'error: health check failed at 2026-09-30T22:01:27.297Z (pid 1850465)\n';
+  const after = 'error: health check failed at 2026-09-30T22:02:10.111Z (pid 1850999)\n';
+
+  const comparison = compareScriptResults(
+    captureScriptResults([{ command: 'node scripts/health.mjs', success: false, code: 1, stderr: before }]),
+    captureScriptResults([{ command: 'node scripts/health.mjs', success: false, code: 1, stderr: after }])
+  );
+
+  assert.equal(comparison.hasNewFailures, false);
+  assert.equal(comparison.hasBaselineNoise, true);
+});
+
+test('scriptDiff: a genuine new error still blocks inside noisy failing output', () => {
+  const before = [
+    'not ok 1 known failure',
+    '  duration_ms: 1.2',
+    'error: health check failed at 2026-09-30T22:01:27.297Z (pid 11)'
+  ].join('\n');
+  const after = [
+    'not ok 1 known failure',
+    '  duration_ms: 4.8',
+    'error: health check failed at 2026-09-30T22:02:10.111Z (pid 22)',
+    'NEW_ERROR: introduced by the update'
+  ].join('\n');
+
+  const comparison = compareScriptResults(
+    captureScriptResults([{ command: 'node scripts/masked.mjs', success: false, code: 1, stderr: before }]),
+    captureScriptResults([{ command: 'node scripts/masked.mjs', success: false, code: 1, stderr: after }])
+  );
+
+  assert.equal(comparison.hasNewFailures, true);
+  assert.equal(comparison.newFailures[0].outputChanged, true);
+  assert.ok(comparison.newFailures[0].addedErrorLines.some((line) => /NEW_ERROR/.test(line)));
+});
+
 test('scriptDiff: temp paths and timings do not count as new failures', () => {
   const beforeResults = captureScriptResults([
     {
@@ -630,6 +730,24 @@ test('script gate: blockOnBaselineFailures stops on pre-existing failures', () =
   assert.equal(comparison.hasNewFailures, false);
   assert.equal(gate.shouldBlock, true);
   assert.match(gate.blockingMessages[0], /blockOnBaselineFailures/);
+  assert.doesNotMatch(gate.blockingMessages.join('\n'), /not blocking/);
+  assert.match(
+    formatValidationGateReason(comparison, { blockOnBaselineFailures: true }),
+    /blockOnBaselineFailures is enabled/
+  );
+  assert.doesNotMatch(
+    formatValidationGateReason(comparison, { blockOnBaselineFailures: true }),
+    /not blocking/
+  );
+  assert.match(
+    formatBeforeScriptsBaselineNotice(1, { blockOnBaselineFailures: true }),
+    /stop the run before the update/
+  );
+  assert.doesNotMatch(
+    formatBeforeScriptsBaselineNotice(1, { blockOnBaselineFailures: true }),
+    /are not blocking/
+  );
+  assert.match(formatBaselineBlockNotice('root', 1), /Stopping before push\/PR/);
 });
 
 test('commandOutput: combines stdout and stderr instead of preferring stderr', () => {

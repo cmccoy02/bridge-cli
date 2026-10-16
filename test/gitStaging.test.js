@@ -38,6 +38,8 @@ test('isDependencyArtifactPath allows manifests and lockfiles only', () => {
   assert.equal(isDependencyArtifactPath('package-lock.json'), true);
   assert.equal(isDependencyArtifactPath('apps/web/pnpm-lock.yaml'), true);
   assert.equal(isDependencyArtifactPath('node_modules/ms/index.js'), false);
+  assert.equal(isDependencyArtifactPath('node_modules/debug/package.json'), false);
+  assert.equal(isDependencyArtifactPath('vendor/pkg/package.json'), false);
   assert.equal(isDependencyArtifactPath('bridge.config.json'), false);
 });
 
@@ -58,6 +60,21 @@ test('stageDependencyChanges stages lockfiles and skips node_modules', async (t)
   const staged = await runCommand('git diff --staged --name-only', { cwd: repo, quiet: true });
   const files = staged.stdout.split('\n').map((line) => line.trim()).filter(Boolean);
   assert.deepEqual(files.sort(), ['package-lock.json', 'package.json']);
+});
+
+test('stageDependencyChanges never stages nested package.json under node_modules', async (t) => {
+  const repo = await makeRepo(t);
+  await fs.mkdir(path.join(repo, 'node_modules', 'debug'), { recursive: true });
+  await fs.writeFile(path.join(repo, 'node_modules', 'debug', 'package.json'), '{"name":"debug"}\n', 'utf8');
+  await fs.writeFile(path.join(repo, 'yarn.lock'), '# yarn lockfile v1\n', 'utf8');
+
+  const result = await stageDependencyChanges(repo);
+  assert.ok(result.staged.includes('yarn.lock'));
+  assert.equal(result.staged.some((file) => file.includes('node_modules')), false);
+
+  const staged = await runCommand('git diff --staged --name-only', { cwd: repo, quiet: true });
+  const files = staged.stdout.split('\n').map((line) => line.trim()).filter(Boolean);
+  assert.deepEqual(files, ['yarn.lock']);
 });
 
 test('isolateUntrackedBridgeConfig moves config out of the working tree', async (t) => {

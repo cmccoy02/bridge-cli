@@ -214,6 +214,31 @@ function nameFromYarnDescriptor(descriptor) {
   return at === -1 ? value : value.slice(0, at);
 }
 
+function yarnVersionIsNewer(candidate, current) {
+  const candidateParts = parseNumericVersionCore(candidate);
+  const currentParts = parseNumericVersionCore(current);
+
+  if (!candidateParts) {
+    return false;
+  }
+
+  if (!currentParts) {
+    return true;
+  }
+
+  for (let index = 0; index < 3; index += 1) {
+    if (candidateParts[index] > currentParts[index]) {
+      return true;
+    }
+
+    if (candidateParts[index] < currentParts[index]) {
+      return false;
+    }
+  }
+
+  return false;
+}
+
 function parseYarnLockfile(content) {
   const map = new Map();
   const lines = content.split(/\r?\n/);
@@ -234,11 +259,17 @@ function parseYarnLockfile(content) {
         continue;
       }
 
-      map.set(descriptor, {
-        name,
-        version,
-        normalizedName: normalizeName(name, 'yarn-lock')
-      });
+      const existing = map.get(name);
+
+      // Key by package name, not descriptor range. A range rewrite such as
+      // semver@^6.0.0 -> semver@^7.0.0 is a bump, not an add+remove.
+      if (!existing || yarnVersionIsNewer(version, existing.version)) {
+        map.set(name, {
+          name,
+          version,
+          normalizedName: normalizeName(name, 'yarn-lock')
+        });
+      }
     }
 
     descriptors = [];

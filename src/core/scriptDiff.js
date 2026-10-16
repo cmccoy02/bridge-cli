@@ -170,10 +170,16 @@ export function formatNewFailureBlockMessage(label, failure) {
   }
 
   if (failure?.outputChanged) {
+    const added = Array.isArray(failure.addedErrorLines)
+      ? failure.addedErrorLines.filter(Boolean).slice(0, 8)
+      : [];
+    const addedText =
+      added.length > 0 ? ` Added error lines: ${added.join(' | ')}.` : '';
+
     return (
       `${label}: NEW after-script failure inside an already-failing command: ${command} ` +
       `(exit code ${exitCode}). Failure output changed after the update ` +
-      `(new error lines not present on the committed baseline). Stopping before push/PR.`
+      `(new error lines not present on the committed baseline).${addedText} Stopping before push/PR.`
     );
   }
 
@@ -198,7 +204,17 @@ export function formatBaselineBlockNotice(label, count) {
   );
 }
 
-export function formatBeforeScriptsBaselineNotice(count) {
+export function formatBeforeScriptsBaselineNotice(
+  count,
+  { blockOnBaselineFailures = false } = {}
+) {
+  if (blockOnBaselineFailures) {
+    return (
+      `Before-scripts recorded ${count} failure(s) on the committed baseline. ` +
+      `blockOnBaselineFailures is enabled, so these failures stop the run before the update.`
+    );
+  }
+
   return (
     `Before-scripts recorded ${count} failure(s) on the committed baseline. ` +
     `Pre-existing failures are not blocking; only NEW failures after the update stop push/PR.`
@@ -209,7 +225,10 @@ export function formatResolvedFailuresNotice(label, count) {
   return `${label}: ${count} pre-existing baseline script failure(s) now pass after the update.`;
 }
 
-export function formatValidationGateReason(comparison) {
+export function formatValidationGateReason(
+  comparison,
+  { blockOnBaselineFailures = false } = {}
+) {
   if (comparison?.hasNewFailures) {
     const outputChanged = (comparison.newFailures || []).filter(
       (failure) => failure.outputChanged
@@ -234,6 +253,10 @@ export function formatValidationGateReason(comparison) {
   }
 
   if (comparison?.hasBaselineNoise) {
+    if (blockOnBaselineFailures) {
+      return `${comparison.baselineFailureCount} baseline script failure(s) blocking because blockOnBaselineFailures is enabled`;
+    }
+
     return 'Pre-existing baseline failures only (already present before the update; not blocking)';
   }
 
@@ -287,7 +310,10 @@ export function evaluateScriptValidationGate(
   };
 }
 
-export function formatScriptDiffSummary(comparison) {
+export function formatScriptDiffSummary(
+  comparison,
+  { blockOnBaselineFailures = false } = {}
+) {
   if (!comparison) {
     return 'Script validation: not available';
   }
@@ -318,9 +344,15 @@ export function formatScriptDiffSummary(comparison) {
   }
 
   if (comparison.baselineFailureCount > 0) {
-    parts.push(
-      `${comparison.baselineFailureCount} pre-existing baseline failure(s) (already present before the update; not blocking)`
-    );
+    if (blockOnBaselineFailures) {
+      parts.push(
+        `${comparison.baselineFailureCount} baseline script failure(s) blocking because blockOnBaselineFailures is enabled`
+      );
+    } else {
+      parts.push(
+        `${comparison.baselineFailureCount} pre-existing baseline failure(s) (already present before the update; not blocking)`
+      );
+    }
   }
 
   if (comparison.resolvedCount > 0) {
@@ -365,7 +397,8 @@ export function createScriptDiffReport(beforeResults, afterResults, options = {}
         command: f.command,
         exitCode: f.exitCode,
         outputChanged: Boolean(f.outputChanged),
-        notMeasuredOnBaseline: Boolean(f.notMeasuredOnBaseline)
+        notMeasuredOnBaseline: Boolean(f.notMeasuredOnBaseline),
+        addedErrorLines: Array.isArray(f.addedErrorLines) ? f.addedErrorLines : []
       })),
       baselineFailures: comparison.baselineFailures.map((b) => ({
         command: b.after.command,

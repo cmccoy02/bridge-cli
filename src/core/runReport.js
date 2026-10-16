@@ -76,6 +76,39 @@ function commandFailureDetails(error) {
   return details;
 }
 
+function appendCommandStreams(lines, failure, heading = '') {
+  if (heading) {
+    lines.push(heading, '');
+  }
+
+  if (failure?.command) {
+    lines.push(`Command: ${redactSensitiveText(failure.command)}`);
+  }
+
+  if (Number.isInteger(failure?.code ?? failure?.exitCode)) {
+    lines.push(`Exit code: ${failure.code ?? failure.exitCode}`);
+  }
+
+  if (Array.isArray(failure?.addedErrorLines) && failure.addedErrorLines.length > 0) {
+    lines.push('Added error lines:');
+    for (const added of failure.addedErrorLines) {
+      lines.push(`  ${redactSensitiveText(added)}`);
+    }
+  }
+
+  if (failure?.stderr) {
+    lines.push('--- stderr ---', redactSensitiveText(failure.stderr), '');
+  }
+
+  if (failure?.stdout) {
+    lines.push('--- stdout ---', redactSensitiveText(failure.stdout), '');
+  }
+
+  if (!failure?.stderr && !failure?.stdout && failure?.output) {
+    lines.push('--- output ---', redactSensitiveText(failure.output), '');
+  }
+}
+
 export async function writeFailureEvidence(runId, error) {
   const details = commandFailureDetails(error);
 
@@ -83,12 +116,23 @@ export async function writeFailureEvidence(runId, error) {
     return '';
   }
 
+  const extraFailures = Array.isArray(error?.failures)
+    ? error.failures.filter(Boolean)
+    : [];
   const lines = [
     `Bridge run failure: ${details.message}`,
     details.command ? `Command: ${details.command}` : '',
     Number.isInteger(details.exitCode) ? `Exit code: ${details.exitCode}` : '',
     ''
   ].filter(Boolean);
+
+  if (Array.isArray(error?.addedErrorLines) && error.addedErrorLines.length > 0) {
+    lines.push('Added error lines:');
+    for (const added of error.addedErrorLines) {
+      lines.push(`  ${redactSensitiveText(added)}`);
+    }
+    lines.push('');
+  }
 
   if (error?.stderr) {
     lines.push('--- stderr ---', redactSensitiveText(error.stderr), '');
@@ -100,6 +144,22 @@ export async function writeFailureEvidence(runId, error) {
 
   if (!error?.stderr && !error?.stdout && error?.output) {
     lines.push('--- output ---', redactSensitiveText(error.output), '');
+  }
+
+  const extraToWrite = extraFailures.filter((failure) => {
+    if (!failure?.command) {
+      return Boolean(failure?.stdout || failure?.stderr || failure?.output);
+    }
+
+    return failure.command !== error?.command;
+  });
+
+  for (const [index, failure] of extraToWrite.entries()) {
+    appendCommandStreams(
+      lines,
+      failure,
+      `--- failing command ${index + 1} ---`
+    );
   }
 
   const failurePath = getRunFailurePath(runId);
@@ -355,7 +415,9 @@ function collectGateDecisions(auditResults, validationResults, bundleResults) {
       gate: 'validation',
       scope: validation.label || 'root',
       passed: !blocked,
-      reason: formatValidationGateReason(validation.comparison)
+      reason: formatValidationGateReason(validation.comparison, {
+        blockOnBaselineFailures: validation.blockOnBaselineFailures === true
+      })
     });
   }
 

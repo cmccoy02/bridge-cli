@@ -1,9 +1,9 @@
 import fs from 'node:fs/promises';
-import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 
 import { DEFAULT_BRANCH_PREFIX, PACKAGE_MANAGER_PRESETS, CONFIG_CANDIDATES } from '../constants.js';
+import { getBridgeVersion } from '../core/bridgeVersion.js';
 import { loadConfig } from '../core/configReader.js';
 import {
   cleanupLocalConfigAfterSuccessfulPush,
@@ -42,6 +42,7 @@ import {
   compareScriptResults,
   createScriptDiffReport,
   evaluateScriptValidationGate,
+  formatBaselineBlockNotice,
   formatBeforeScriptsBaselineNotice,
   formatScriptDiffSummary
 } from '../core/scriptDiff.js';
@@ -54,14 +55,18 @@ import { CommandExecutionError, runCommand } from '../core/executor.js';
 import {
   assertSafeWorkingBranch,
   commitChanges,
+  forceWithLeasePushCommand,
+  formatForeignCommitRefusal,
   getCurrentHeadSha,
   getOriginUrl,
   getCompareUrl,
   hasStagedChanges,
+  inspectRemoteBranchForForcePush,
   prepareCleanBase,
   pushBridgeBranch,
   setOriginUrl,
-  stageDependencyChanges
+  stageDependencyChanges,
+  stripCopiedWorktreeMetadata
 } from '../core/git.js';
 import {
   checkTransitiveMajorPolicy,
@@ -83,6 +88,7 @@ import {
   buildPullRequestBody,
   createPullRequest,
   findReusableBridgePullRequest,
+  makePullRequestScopeKey,
   updatePullRequest
 } from '../core/pullRequest.js';
 import { getRunReportPath, writeFailureEvidence, writeRunReport } from '../core/runReport.js';
@@ -92,13 +98,16 @@ import {
   formatPythonRequirementsSummary,
   runPythonRequirementsWildcardUpdate
 } from '../core/pythonRequirementsUpdater.js';
+import {
+  exitCodeForSignal,
+  installRunSignalHandlers,
+  removeWorkspace,
+  sweepStaleBridgeWorkspaces
+} from '../core/workspaceCleanup.js';
 import { printBanner } from '../ui/banner.js';
 import { command, error, info, line, success, warn } from '../ui/logger.js';
 import { createSpinner } from '../ui/spinner.js';
 import { printSummary } from '../ui/summary.js';
-
-const require = createRequire(import.meta.url);
-const packageJson = require('../../package.json');
 
 class PatchPolicyError extends Error {
   constructor(message, commandResult = null, extras = {}) {
@@ -112,6 +121,14 @@ class PatchPolicyError extends Error {
       this.code = commandResult.code ?? commandResult.exitCode;
       this.stdout = commandResult.stdout || '';
       this.stderr = commandResult.stderr || '';
+    }
+
+    if (Array.isArray(extras.failures)) {
+      this.failures = extras.failures;
+    }
+
+    if (Array.isArray(extras.addedErrorLines)) {
+      this.addedErrorLines = extras.addedErrorLines;
     }
   }
 }
@@ -763,7 +780,69 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
   const beforeScriptResults = captureScriptResults(beforeValidation.results);
 
   if (beforeValidation.failures.length > 0) {
-    warn(formatBeforeScriptsBaselineNotice(beforeValidation.failures.length));
+    if (scope.blockOnBaselineFailures === true) {
+      const baselineComparison = {
+        beforeFailureCount: beforeValidation.failures.length,
+        afterFailureCount: beforeValidation.failures.length,
+        newFailureCount: 0,
+        baselineFailureCount: beforeValidation.failures.length,
+        resolvedCount: 0,
+        hasNewFailures: false,
+        hasBaselineNoise: true,
+        hasOutputChangedFailures: false,
+        newFailures: [],
+        baselineFailures: beforeValidation.failures.map((failure) => ({
+          before: failure,
+          after: failure
+        })),
+        outputChangedFailures: [],
+        resolved: []
+      };
+
+      throw new PatchPolicyError(
+        formatBaselineBlockNotice(label, beforeValidation.failures.length),
+        beforeValidation.failures[0],
+        {
+          gateType: 'policy_block',
+          failures: beforeValidation.failures,
+          scopeResult: {
+            metricsSummary,
+            deltas: [],
+            hasUpdates: false,
+            audit: {
+              label,
+              before: beforeAudit,
+              after: beforeAudit,
+              comparison: null,
+              report: null
+            },
+            bundle: {
+              label,
+              before: { supported: false, analysis: null, artifactPath: '' },
+              after: { supported: false, analysis: null, artifactPath: '' },
+              comparison: null
+            },
+            validation: {
+              label,
+              scriptDiff: createScriptDiffReport(
+                beforeScriptResults,
+                beforeScriptResults,
+                { beforeCommands: scope.beforeScripts }
+              ),
+              comparison: baselineComparison,
+              blocked: true,
+              blockOnBaselineFailures: true
+            }
+          }
+        }
+      );
+    }
+
+    warn(
+      formatBeforeScriptsBaselineNotice(beforeValidation.failures.length, {
+        blockOnBaselineFailures: false
+      })
+    );
   }
 
   const beforeBundle = await runVisualizer({
@@ -1165,6 +1244,7 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
     label,
     blockOnBaselineFailures: scope.blockOnBaselineFailures === true
   });
+  const blockOnBaselineFailures = scope.blockOnBaselineFailures === true;
 
   if (scriptGate.shouldBlock) {
     policyViolations.push(...scriptGate.blockingMessages);
@@ -1189,7 +1269,7 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
     !scriptGate.shouldBlock,
     scriptGate.shouldBlock
       ? scriptGate.blockingMessages.join(' ')
-      : formatScriptDiffSummary(scriptComparison)
+      : formatScriptDiffSummary(scriptComparison, { blockOnBaselineFailures })
   );
 
   if (auditComparison?.comparable) {
@@ -1270,15 +1350,22 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
       label,
       scriptDiff: scriptDiffReport,
       comparison: scriptComparison,
-      blocked: scriptGate.shouldBlock
+      blocked: scriptGate.shouldBlock,
+      blockOnBaselineFailures
     }
   };
 
   if (policyViolations.length > 0) {
-    const firstFailure =
-      afterValidation.failures.find((result) =>
-        (scriptComparison.newFailures || []).some((failure) => failure.command === result.command)
-      ) || afterValidation.failures[0];
+    const newFailureCommands = new Set(
+      (scriptComparison.newFailures || []).map((failure) => failure.command)
+    );
+    const failingResults = afterValidation.failures.filter((result) =>
+      newFailureCommands.has(result.command)
+    );
+    const firstFailure = failingResults[0] || afterValidation.failures[0];
+    const addedErrorLines = (scriptComparison.newFailures || []).flatMap(
+      (failure) => failure.addedErrorLines || []
+    );
     const gateType = scriptComparison.hasNewFailures
       ? 'validation_block'
       : auditComparison?.blocked
@@ -1288,7 +1375,9 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
           : 'policy_block';
     throw new PatchPolicyError(policyViolations.join(' '), firstFailure, {
       gateType,
-      scopeResult
+      scopeResult,
+      failures: failingResults.length > 0 ? failingResults : afterValidation.failures,
+      addedErrorLines
     });
   }
 
@@ -1372,6 +1461,11 @@ export async function patchCommand({
   const repoName = config.name || path.basename(cwd);
   run.repo = repoName;
   const tempDir = path.join(os.tmpdir(), `bridge-${sanitizeSegment(repoName)}-${Date.now()}`);
+  try {
+    await sweepStaleBridgeWorkspaces();
+  } catch {
+    // Stale-temp sweep is best-effort.
+  }
   const branchPrefix = config.branchPrefix || DEFAULT_BRANCH_PREFIX;
   const dateStamp = getDateStamp();
   const configFileName = path.basename(configPath);
@@ -1424,10 +1518,70 @@ export async function patchCommand({
     requestedScope,
     configPath,
     environment: runtimeEnvironment,
-    bridgeVersion: packageJson.version
+    bridgeVersion: getBridgeVersion()
   });
 
   configFileSha256 = await computeFileSha256(configPath);
+
+  let uninstallSignals = () => {};
+  uninstallSignals = installRunSignalHandlers(async (signal) => {
+    uninstallSignals();
+    status = 'cancelled';
+    failure = new Error(
+      `Run cancelled (${signal}). Writing a partial report and removing the isolated workspace.`
+    );
+    earlyExit = createEarlyExitReason('cancelled');
+
+    try {
+      await logRunFailure(run, failure, { signal });
+      await logRunEnd(run, 'cancelled', { branchName, signal });
+      failurePath = await writeFailureEvidence(run.runId, failure);
+      const savedReport = await writeRunReport({
+        run,
+        status,
+        repo: repoName,
+        configPath,
+        dryRun,
+        keepWorkspace: false,
+        requestedScope,
+        branchName,
+        baseBranch,
+        baseSha,
+        headSha,
+        stagedFiles,
+        changedFilesCount,
+        dependencySummary: depDeltaSummary,
+        auditResults,
+        bundleResults,
+        validationResults,
+        localPackages: runtimeLocalPackages,
+        pullRequest,
+        failure,
+        failurePath,
+        configFileSha256,
+        configStaged,
+        configMutated,
+        earlyExit,
+        phaseTiming,
+        skippedCount,
+        blockedCount,
+        environment: runtimeEnvironment
+      });
+      runReportPath = savedReport.reportPath;
+      warn(`Run cancelled (${signal}). Partial report: ${runReportPath}`);
+    } catch (cancelError) {
+      warn(`Run cancelled (${signal}). Could not save a partial report: ${cancelError.message}`);
+    }
+
+    try {
+      await removeWorkspace(tempDir);
+      info(`Cleaned isolated workspace: ${tempDir}`);
+    } catch (cleanupError) {
+      warn(`Failed to delete temp directory: ${cleanupError.message}`);
+    }
+
+    process.exit(exitCodeForSignal(signal));
+  });
 
   try {
     await runPhase({
@@ -1438,6 +1592,7 @@ export async function patchCommand({
       meta: { tempDir },
       task: async () => {
         await copyToIsolatedWorkspace(cwd, tempDir);
+        await stripCopiedWorktreeMetadata(tempDir);
 
         if (portableOriginUrl) {
           await setOriginUrl(tempDir, portableOriginUrl);
@@ -1642,25 +1797,38 @@ export async function patchCommand({
       quiet: true
     });
     const originUrl = await getOriginUrl(tempDir);
+    const scopeMeta = {
+      v: 1,
+      scopeKey: makePullRequestScopeKey({
+        configSha256: configFileSha256,
+        requestedScope: requestedScope || 'all',
+        updateCommands: scopes.map((scope) => scope.updateCommand),
+        directPackages: dependencyDeltas
+          .filter((delta) => delta?.kind === 'direct')
+          .map((delta) => delta.name)
+      })
+    };
     const reusablePullRequest = await findReusableBridgePullRequest({
       cwd: tempDir,
       repoUrl: originUrl || config.repoUrl,
       baseBranch,
       branchPrefix,
-      stagedDiff: stagedDiffResult.stdout || ''
+      stagedDiff: stagedDiffResult.stdout || '',
+      scopeKey: scopeMeta.scopeKey
     });
 
-    if (reusablePullRequest?.identical) {
+    if (reusablePullRequest?.reuseAction === 'reuse_identical') {
+      branchName = reusablePullRequest.headRefName;
       pullRequest = {
         status: 'existing',
         url: reusablePullRequest.url,
         message: `Reusing open Bridge pull request with identical changes: ${reusablePullRequest.url}`
       };
-      compareUrl = getCompareUrl(originUrl || config.repoUrl, reusablePullRequest.headRefName);
+      compareUrl = getCompareUrl(originUrl || config.repoUrl, branchName);
       success(pullRequest.message);
       status = 'pushed';
       await logPhase(run, 'pull_request', 'success', {
-        branchName: reusablePullRequest.headRefName,
+        branchName,
         baseBranch,
         pullRequestStatus: 'existing',
         url: pullRequest.url,
@@ -1669,7 +1837,7 @@ export async function patchCommand({
         identical: true
       });
       await logRunEnd(run, 'pushed', {
-        branchName: reusablePullRequest.headRefName,
+        branchName,
         baseBranch,
         compareUrl,
         pullRequest,
@@ -1678,38 +1846,68 @@ export async function patchCommand({
       return true;
     }
 
-    const pushBranchName = reusablePullRequest?.sameFiles
+    if (reusablePullRequest?.reuseReason) {
+      info(reusablePullRequest.reuseReason);
+    }
+
+    const shouldUpdateExisting = reusablePullRequest?.reuseAction === 'update';
+    let leaseSha = '';
+    const workingBranchName = branchName;
+
+    if (shouldUpdateExisting) {
+      const inspection = await inspectRemoteBranchForForcePush(tempDir, {
+        baseBranch,
+        headRefName: reusablePullRequest.headRefName
+      });
+
+      if (inspection.foreignCommits.length > 0) {
+        throw new PatchPolicyError(
+          formatForeignCommitRefusal(
+            reusablePullRequest.headRefName,
+            inspection.foreignCommits
+          ),
+          null,
+          { gateType: 'policy_block' }
+        );
+      }
+
+      leaseSha = inspection.tipSha;
+      branchName = reusablePullRequest.headRefName;
+    }
+
+    const pushBranchName = shouldUpdateExisting
       ? reusablePullRequest.headRefName
-      : branchName;
+      : workingBranchName;
 
     await runPhase({
       run,
       phase: 'push',
-      spinnerText: reusablePullRequest?.sameFiles
+      spinnerText: shouldUpdateExisting
         ? 'Updating existing Bridge pull request...'
         : 'Committing and pushing branch...',
-      successText: reusablePullRequest?.sameFiles
+      successText: shouldUpdateExisting
         ? 'Existing Bridge pull request updated'
         : 'Candidate branch pushed',
       task: async () => {
         await assertSafeWorkingBranch(tempDir, {
-          branchName,
+          branchName: workingBranchName,
           defaultBranch: baseBranch,
           protectedBranches: config.protectedBranches
         });
         await commitChanges(tempDir, 'bridge: update dependencies (non-breaking)');
         headSha = await getCurrentHeadSha(tempDir);
+        scopeMeta.headSha = headSha;
 
-        if (reusablePullRequest?.sameFiles) {
-          await runCommand(
-            `git push --force-with-lease origin HEAD:${reusablePullRequest.headRefName}`,
-            { cwd: tempDir, quiet: !verbose }
-          );
+        if (shouldUpdateExisting) {
+          await runCommand(forceWithLeasePushCommand(pushBranchName, leaseSha), {
+            cwd: tempDir,
+            quiet: !verbose
+          });
           return;
         }
 
         await pushBridgeBranch(tempDir, {
-          branchName,
+          branchName: workingBranchName,
           defaultBranch: baseBranch,
           protectedBranches: config.protectedBranches
         });
@@ -1729,28 +1927,37 @@ export async function patchCommand({
       validationResults,
       bundleResults,
       runReportPath,
-      bridgeVersion: packageJson.version
+      bridgeVersion: getBridgeVersion(),
+      scopeMeta
     });
 
-    if (reusablePullRequest?.sameFiles) {
+    if (shouldUpdateExisting) {
       const edited = await updatePullRequest({
         cwd: tempDir,
         number: reusablePullRequest.number,
         repoUrl: originUrl || config.repoUrl,
         body: pullRequestBody
       });
-      pullRequest = {
-        status: 'existing',
-        url: reusablePullRequest.url,
-        message:
-          edited.status === 'updated'
-            ? `Updated existing Bridge pull request: ${reusablePullRequest.url}`
-            : `Updated existing Bridge branch; PR body not refreshed: ${reusablePullRequest.url}`
-      };
+
+      if (edited.status === 'updated') {
+        pullRequest = {
+          status: 'existing',
+          url: reusablePullRequest.url,
+          message: `Updated existing Bridge pull request: ${reusablePullRequest.url}`
+        };
+      } else {
+        pullRequest = {
+          status: 'body_update_failed',
+          url: reusablePullRequest.url,
+          message:
+            edited.message ||
+            `Failed to refresh pull request body for ${reusablePullRequest.url}`
+        };
+      }
     } else {
       pullRequest = await createPullRequest({
         cwd: tempDir,
-        branchName,
+        branchName: pushBranchName,
         baseBranch,
         repoUrl: originUrl || config.repoUrl,
         dependencySummary: depDeltaSummary,
@@ -1759,7 +1966,8 @@ export async function patchCommand({
         validationResults,
         bundleResults,
         runReportPath,
-        bridgeVersion: packageJson.version,
+        bridgeVersion: getBridgeVersion(),
+        scopeMeta,
         options: config.pullRequest
       });
     }
@@ -1877,6 +2085,8 @@ export async function patchCommand({
     await logRunEnd(run, 'failed', { branchName, earlyExit });
     return false;
   } finally {
+    uninstallSignals();
+
     if (failure) {
       try {
         failurePath = await writeFailureEvidence(run.runId, failure);
@@ -1937,7 +2147,7 @@ export async function patchCommand({
       warn(`Kept isolated workspace for debugging: ${tempDir}`);
     } else {
       try {
-        await fs.rm(tempDir, { recursive: true, force: true });
+        await removeWorkspace(tempDir);
         info(`Cleaned isolated workspace: ${tempDir}`);
       } catch (cleanupError) {
         warn(`Failed to delete temp directory: ${cleanupError.message}`);
@@ -1977,7 +2187,11 @@ export async function patchCommand({
         });
       const scriptLines = validationResults
         .filter((entry) => entry?.comparison)
-        .map((entry) => `${entry.label}: ${formatScriptDiffSummary(entry.comparison)}`);
+        .map((entry) =>
+          `${entry.label}: ${formatScriptDiffSummary(entry.comparison, {
+            blockOnBaselineFailures: entry.blockOnBaselineFailures === true
+          })}`
+        );
 
       printSummary(
         [
@@ -1997,10 +2211,24 @@ export async function patchCommand({
         ].filter(Boolean),
         'Bridge dry run'
       );
+    } else if (status === 'cancelled') {
+      printSummary(
+        [
+          'Bridge run cancelled.',
+          failure?.message ? `Reason: ${failure.message}` : 'Reason: signal',
+          runReportPath ? `Report: ${runReportPath}` : '',
+          'Isolated workspace cleaned.'
+        ].filter(Boolean),
+        'Bridge run cancelled'
+      );
     } else if (status === 'failed') {
       const scriptLines = validationResults
         .filter((entry) => entry?.comparison)
-        .map((entry) => `${entry.label}: ${formatScriptDiffSummary(entry.comparison)}`);
+        .map((entry) =>
+          `${entry.label}: ${formatScriptDiffSummary(entry.comparison, {
+            blockOnBaselineFailures: entry.blockOnBaselineFailures === true
+          })}`
+        );
 
       printSummary(
         [
@@ -2035,7 +2263,11 @@ export async function patchCommand({
         });
       const scriptLines = validationResults
         .filter((entry) => entry?.comparison)
-        .map((entry) => `${entry.label}: ${formatScriptDiffSummary(entry.comparison)}`);
+        .map((entry) =>
+          `${entry.label}: ${formatScriptDiffSummary(entry.comparison, {
+            blockOnBaselineFailures: entry.blockOnBaselineFailures === true
+          })}`
+        );
 
       printSummary(
         [

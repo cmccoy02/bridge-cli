@@ -1,7 +1,13 @@
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+
 import { formatBytes } from './bundleAnalysis.js';
 import { commandExists, runCommand } from './executor.js';
 import { redactSensitiveText } from './redaction.js';
 import { formatValidationPrLine } from './scriptDiff.js';
+
+const BRIDGE_PR_MARKER_RE = /<!--\s*bridge-meta:([\s\S]*?)-->/;
 
 function shellQuote(value) {
   return `'${String(value ?? '').replace(/'/g, `"'"'`)}'`;
@@ -131,6 +137,82 @@ function formatBundleSection(bundleResults = []) {
   return lines;
 }
 
+export function buildBridgePrMarker(meta = {}) {
+  return `<!-- bridge-meta:${JSON.stringify(meta)} -->`;
+}
+
+export function parseBridgePrMarker(body) {
+  const match = String(body || '').match(BRIDGE_PR_MARKER_RE);
+
+  if (!match) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(match[1]);
+  } catch {
+    return null;
+  }
+}
+
+export function makePullRequestScopeKey({
+  configSha256 = '',
+  requestedScope = 'all',
+  updateCommands = [],
+  directPackages = []
+} = {}) {
+  const commands = (Array.isArray(updateCommands) ? updateCommands : [])
+    .map((command) => String(command || '').trim())
+    .filter(Boolean);
+  const packages = [
+    ...new Set(
+      (Array.isArray(directPackages) ? directPackages : [])
+        .map((name) => String(name || '').trim())
+        .filter(Boolean)
+    )
+  ].sort();
+
+  return [
+    String(configSha256 || ''),
+    String(requestedScope || 'all'),
+    commands.join('\n'),
+    packages.join(',')
+  ].join('|');
+}
+
+export function decidePullRequestReuse({
+  identical = false,
+  sameFiles = false,
+  localScopeKey = '',
+  remoteMarker = null
+} = {}) {
+  if (identical) {
+    return { action: 'reuse_identical', reason: '' };
+  }
+
+  if (!sameFiles) {
+    return { action: 'open_new', reason: '' };
+  }
+
+  if (!remoteMarker || !remoteMarker.scopeKey) {
+    return {
+      action: 'open_new',
+      reason:
+        'An open Bridge pull request touches the same files but has no scope marker. Opening a new PR instead of replacing it.'
+    };
+  }
+
+  if (localScopeKey && remoteMarker.scopeKey !== localScopeKey) {
+    return {
+      action: 'open_new',
+      reason:
+        'An open Bridge pull request covers a different update scope. Opening a new PR instead of replacing it.'
+    };
+  }
+
+  return { action: 'update', reason: '' };
+}
+
 export function buildPullRequestBody({
   branchName,
   baseBranch,
@@ -140,7 +222,8 @@ export function buildPullRequestBody({
   validationResults,
   bundleResults = [],
   runReportPath,
-  bridgeVersion = ''
+  bridgeVersion = '',
+  scopeMeta = null
 }) {
   const direct = Number(dependencySummary?.directChanged) || 0;
   const transitive = Number(dependencySummary?.transitiveChanged) || 0;
@@ -225,6 +308,10 @@ export function buildPullRequestBody({
     lines.push('', `> Report: \`${runReportPath}\``);
   }
 
+  if (scopeMeta && typeof scopeMeta === 'object') {
+    lines.push('', buildBridgePrMarker(scopeMeta));
+  }
+
   return lines.join('\n');
 }
 
@@ -268,6 +355,7 @@ export async function findReusableBridgePullRequest({
   baseBranch,
   branchPrefix = 'bridge/patch',
   stagedDiff = '',
+  scopeKey = '',
   commandExistsFn = commandExists,
   runCommandFn = runCommand
 } = {}) {
@@ -281,7 +369,7 @@ export async function findReusableBridgePullRequest({
     repository ? `--repo ${shellQuote(repository)}` : '',
     '--state open',
     '--limit 50',
-    '--json number,url,title,headRefName,baseRefName'
+    '--json number,url,title,headRefName,baseRefName,body'
   ]
     .filter(Boolean)
     .join(' ');
@@ -315,6 +403,7 @@ export async function findReusableBridgePullRequest({
 
   const localFiles = filesFromDiff(stagedDiff);
   const localNormalized = normalizePullRequestDiff(stagedDiff);
+  const matches = [];
 
   for (const candidate of candidates) {
     const diffCommand = [
@@ -337,25 +426,38 @@ export async function findReusableBridgePullRequest({
     const remoteDiff = remote.stdout || '';
     const remoteNormalized = normalizePullRequestDiff(remoteDiff);
     const remoteFiles = filesFromDiff(remoteDiff);
+    const remoteMarker = parseBridgePrMarker(candidate.body);
+    const identical =
+      Boolean(localNormalized && remoteNormalized && localNormalized === remoteNormalized);
+    const sameFiles = localFiles.length > 0 && sameFileSet(localFiles, remoteFiles);
 
-    if (localNormalized && remoteNormalized && localNormalized === remoteNormalized) {
-      return {
-        ...candidate,
-        identical: true,
-        sameFiles: true
-      };
+    if (!identical && !sameFiles) {
+      continue;
     }
 
-    if (localFiles.length > 0 && sameFileSet(localFiles, remoteFiles)) {
-      return {
-        ...candidate,
-        identical: false,
-        sameFiles: true
-      };
-    }
+    const decision = decidePullRequestReuse({
+      identical,
+      sameFiles,
+      localScopeKey: scopeKey,
+      remoteMarker
+    });
+
+    matches.push({
+      ...candidate,
+      identical,
+      sameFiles,
+      remoteMarker,
+      reuseAction: decision.action,
+      reuseReason: decision.reason
+    });
   }
 
-  return null;
+  return (
+    matches.find((entry) => entry.reuseAction === 'reuse_identical') ||
+    matches.find((entry) => entry.reuseAction === 'update') ||
+    matches[0] ||
+    null
+  );
 }
 
 export async function updatePullRequest({
@@ -372,34 +474,66 @@ export async function updatePullRequest({
   }
 
   const repository = getGitHubRepository(repoUrl);
-  const command = [
-    'gh pr edit',
-    String(number),
-    repository ? `--repo ${shellQuote(repository)}` : '',
-    title ? `--title ${shellQuote(title)}` : '',
-    body ? `--body ${shellQuote(body)}` : ''
-  ]
-    .filter(Boolean)
-    .join(' ');
-  const updated = await runCommandFn(command, {
-    cwd,
-    allowFailure: true,
-    quiet: true
-  });
 
-  if (!updated.success) {
+  if (!repository) {
     return {
       status: 'failed',
       url: '',
-      message: `GitHub CLI could not update pull request #${number}: ${redactSensitiveText(`${updated.stdout || ''}\n${updated.stderr || ''}`.trim()) || 'unknown error'}`
+      message: `Cannot update pull request #${number} without a GitHub repository URL.`
     };
   }
 
-  return {
-    status: 'updated',
-    url: '',
-    message: `Updated pull request #${number}`
-  };
+  const payload = {};
+
+  if (body) {
+    payload.body = body;
+  }
+
+  if (title) {
+    payload.title = title;
+  }
+
+  if (Object.keys(payload).length === 0) {
+    return {
+      status: 'updated',
+      url: '',
+      message: `No pull request fields to update for #${number}`
+    };
+  }
+
+  const inputPath = path.join(os.tmpdir(), `bridge-pr-update-${number}-${Date.now()}.json`);
+  await fs.writeFile(inputPath, JSON.stringify(payload), 'utf8');
+
+  try {
+    const command = [
+      'gh api',
+      '-X PATCH',
+      shellQuote(`repos/${repository}/pulls/${number}`),
+      '--input',
+      shellQuote(inputPath)
+    ].join(' ');
+    const updated = await runCommandFn(command, {
+      cwd,
+      allowFailure: true,
+      quiet: true
+    });
+
+    if (!updated.success) {
+      return {
+        status: 'failed',
+        url: '',
+        message: `GitHub CLI could not update pull request #${number}: ${redactSensitiveText(`${updated.stdout || ''}\n${updated.stderr || ''}`.trim()) || 'unknown error'}`
+      };
+    }
+
+    return {
+      status: 'updated',
+      url: '',
+      message: `Updated pull request #${number}`
+    };
+  } finally {
+    await fs.rm(inputPath, { force: true });
+  }
 }
 
 export async function createPullRequest({
@@ -414,6 +548,7 @@ export async function createPullRequest({
   bundleResults = [],
   runReportPath = '',
   bridgeVersion = '',
+  scopeMeta = null,
   options,
   commandExistsFn = commandExists,
   runCommandFn = runCommand
@@ -457,7 +592,8 @@ export async function createPullRequest({
     validationResults,
     bundleResults,
     runReportPath,
-    bridgeVersion
+    bridgeVersion,
+    scopeMeta
   });
   const repository = getGitHubRepository(repoUrl);
   const command = [

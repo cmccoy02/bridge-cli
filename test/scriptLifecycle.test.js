@@ -98,7 +98,10 @@ function packageLock(version) {
   };
 }
 
-async function writePatchFixture(repoDir, { defaultBranch, beforeScripts, afterScripts }) {
+async function writePatchFixture(
+  repoDir,
+  { defaultBranch, beforeScripts, afterScripts, extraConfig = {} }
+) {
   const config = {
     name: 'script-lifecycle-fixture',
     packageManager: 'npm',
@@ -111,7 +114,8 @@ async function writePatchFixture(repoDir, { defaultBranch, beforeScripts, afterS
     auditCommand: `node -e 'console.log(${JSON.stringify(emptyAuditJson())})'`,
     blockOnNewVulnerabilities: true,
     branchPrefix: 'bridge/test',
-    defaultBranch
+    defaultBranch,
+    ...extraConfig
   };
   const packageJson = {
     name: 'fixture',
@@ -140,16 +144,19 @@ async function writePatchFixture(repoDir, { defaultBranch, beforeScripts, afterS
   await git(repoDir, `push origin ${defaultBranch}`);
 }
 
-async function runPatch(repoDir, bridgeHome) {
-  return runCommand(`${quote(process.execPath)} ${quote(cliPath)} patch`, {
-    cwd: repoDir,
-    quiet: true,
-    allowFailure: true,
-    env: {
-      ...gitEnv,
-      BRIDGE_HOME: bridgeHome
+async function runPatch(repoDir, bridgeHome, extraArgs = '') {
+  return runCommand(
+    `${quote(process.execPath)} ${quote(cliPath)} patch${extraArgs ? ` ${extraArgs}` : ''}`,
+    {
+      cwd: repoDir,
+      quiet: true,
+      allowFailure: true,
+      env: {
+        ...gitEnv,
+        BRIDGE_HOME: bridgeHome
+      }
     }
-  });
+  );
 }
 
 async function readActivityPhases(bridgeHome) {
@@ -243,4 +250,33 @@ test('pre-existing baseline failures do not block push and are not called persis
   assert.match(output, /do not block push\/PR/);
   assert.doesNotMatch(output, /persist \(not blocking\)/);
   assert.match(await listRemoteBridgeBranches(repoDir), /refs\/heads\/bridge\/test-/);
+});
+
+test('blockOnBaselineFailures stops after the baseline and before the update', async (t) => {
+  const { repoDir, defaultBranch } = await createRepoWithOrigin(t);
+  const bridgeHome = await makeTempDir(t);
+  const failingScript =
+    'node -e "const p=require(\'./package-lock.json\'); if (p.packages[\'node_modules/example\']) process.exit(1)"';
+
+  await writePatchFixture(repoDir, {
+    defaultBranch,
+    beforeScripts: [failingScript],
+    afterScripts: [failingScript],
+    extraConfig: { blockOnBaselineFailures: true }
+  });
+
+  const result = await runPatch(repoDir, bridgeHome, '--dry-run --block-on-baseline-failures');
+  const output = `${result.stdout}\n${result.stderr}`;
+  const phases = await readActivityPhases(bridgeHome);
+
+  assert.equal(result.success, false);
+  assert.match(output, /blockOnBaselineFailures is enabled/);
+  assert.doesNotMatch(output, /Pre-existing failures are not blocking/);
+  assert.doesNotMatch(output, /already present before the update; not blocking/);
+  assert.ok(phases.some((phase) => phase.startsWith('beforeScripts')));
+  assert.equal(
+    phases.some((phase) => phase.startsWith('update')),
+    false,
+    JSON.stringify(phases)
+  );
 });

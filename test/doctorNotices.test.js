@@ -14,19 +14,38 @@ test('doctor warns when lockfile metrics cannot run', () => {
   assert.ok(notices.some((notice) => /Lockfile metrics and the direct-major gate are inactive for mix/.test(notice)));
 });
 
-test('doctor warns when auditCommand is empty', () => {
+test('doctor does not claim audit is inactive when a default audit exists', () => {
   const notices = collectDisabledGateNotices({
     packageManager: 'pnpm',
     auditCommand: '',
-    beforeScripts: [],
-    afterScripts: []
+    beforeScripts: ['pnpm test'],
+    afterScripts: ['pnpm test']
   });
 
-  assert.ok(notices.some((notice) => /Security audit is inactive/.test(notice)));
+  assert.equal(
+    notices.some((notice) => /Security audit is inactive/.test(notice)),
+    false
+  );
   assert.equal(
     notices.some((notice) => /Lockfile metrics and the direct-major gate are inactive for pnpm/.test(notice)),
     false
   );
+});
+
+test('doctor warns when audit has no default and other gates are off', () => {
+  const notices = collectDisabledGateNotices({
+    packageManager: 'mix',
+    auditCommand: '',
+    beforeScripts: [],
+    afterScripts: [],
+    blockOnNewVulnerabilities: false,
+    allowMajorUpdates: true
+  });
+
+  assert.ok(notices.some((notice) => /Security audit is inactive/.test(notice)));
+  assert.ok(notices.some((notice) => /blockOnNewVulnerabilities is false/.test(notice)));
+  assert.ok(notices.some((notice) => /allowMajorUpdates is true/.test(notice)));
+  assert.ok(notices.some((notice) => /No beforeScripts or afterScripts/.test(notice)));
 });
 
 test('doctor warns about after-only scripts', () => {
