@@ -1,7 +1,18 @@
-import simpleGit from 'simple-git';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 
+import simpleGit from 'simple-git';
+
 import { DEPENDENCY_ARTIFACT_BASENAMES } from '../constants.js';
+
+const IGNORED_STAGE_SEGMENTS = new Set([
+  'node_modules',
+  '.pnpm-store',
+  '.yarn',
+  'vendor'
+]);
+
+const BRIDGE_COMMIT_SUBJECT_PREFIX = 'bridge:';
 
 function getGit(cwd) {
   return simpleGit({ baseDir: cwd });
@@ -70,8 +81,18 @@ export async function stageAll(cwd) {
   await getGit(cwd).add(['-A']);
 }
 
+export function isIgnoredStagingPath(filePath) {
+  const normalized = String(filePath || '').replace(/\\/g, '/');
+  return normalized.split('/').some((segment) => IGNORED_STAGE_SEGMENTS.has(segment));
+}
+
 export function isDependencyArtifactPath(filePath) {
   const normalized = String(filePath || '').replace(/\\/g, '/');
+
+  if (isIgnoredStagingPath(normalized)) {
+    return false;
+  }
+
   const base = path.posix.basename(normalized);
   return DEPENDENCY_ARTIFACT_BASENAMES.has(base);
 }
@@ -271,7 +292,30 @@ async function resolveDefaultBaseBranch(git, configuredDefaultBranch) {
   );
 }
 
+export async function stripCopiedWorktreeMetadata(cwd) {
+  const gitDir = path.join(cwd, '.git');
+  let gitDirStat;
+
+  try {
+    gitDirStat = await fs.lstat(gitDir);
+  } catch {
+    return;
+  }
+
+  if (!gitDirStat.isDirectory()) {
+    return;
+  }
+
+  await fs.rm(path.join(gitDir, 'worktrees'), { recursive: true, force: true });
+}
+
 async function deleteLocalBranchesExcept(git, keepBranch) {
+  try {
+    await git.raw(['worktree', 'prune', '--expire', 'now']);
+  } catch {
+    // A copied repo may have stale worktree metadata; stripping it below is enough.
+  }
+
   const branches = (await git.raw(['branch', '--format=%(refname:short)']))
     .split('\n')
     .map((branch) => branch.trim())
@@ -283,8 +327,18 @@ async function deleteLocalBranchesExcept(git, keepBranch) {
       continue;
     }
 
-    await git.raw(['branch', '-D', branch]);
-    deletedBranches.push(branch);
+    try {
+      await git.raw(['branch', '-D', branch]);
+      deletedBranches.push(branch);
+    } catch (error) {
+      const message = error?.message || String(error);
+
+      if (/used by worktree/i.test(message)) {
+        continue;
+      }
+
+      throw error;
+    }
   }
 
   return deletedBranches;
@@ -491,4 +545,100 @@ export async function getGitRepoIdentity(cwd) {
     hasOriginUrl: originUrl.length > 0,
     hasDefaultBranch: defaultBranch.length > 0
   };
+}
+
+export function isBridgeCommitSubject(subject, prefix = BRIDGE_COMMIT_SUBJECT_PREFIX) {
+  return String(subject || '').trim().startsWith(prefix);
+}
+
+export function parseCommitLogLines(output) {
+  return String(output || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const [sha, authorName, authorEmail, ...subjectParts] = line.split('\t');
+      return {
+        sha: sha || '',
+        authorName: authorName || '',
+        authorEmail: authorEmail || '',
+        subject: subjectParts.join('\t')
+      };
+    });
+}
+
+export async function listCommitsAheadOfBase(cwd, { baseRef, headRef }) {
+  if (!baseRef || !headRef) {
+    return [];
+  }
+
+  try {
+    const output = await getGit(cwd).raw([
+      'log',
+      '--format=%H%x09%an%x09%ae%x09%s',
+      `${baseRef}..${headRef}`
+    ]);
+    return parseCommitLogLines(output);
+  } catch {
+    return [];
+  }
+}
+
+export function getForeignCommits(commits, { messagePrefix = BRIDGE_COMMIT_SUBJECT_PREFIX } = {}) {
+  return (Array.isArray(commits) ? commits : []).filter(
+    (commit) => !isBridgeCommitSubject(commit?.subject, messagePrefix)
+  );
+}
+
+export async function inspectRemoteBranchForForcePush(
+  cwd,
+  { baseBranch, headRefName, fetchRemote = true }
+) {
+  const git = getGit(cwd);
+  const remoteRef = `origin/${headRefName}`;
+
+  if (fetchRemote) {
+    await git.raw(['fetch', 'origin', headRefName]);
+  }
+
+  const tipSha = (await git.revparse([remoteRef])).trim();
+  const commits = await listCommitsAheadOfBase(cwd, {
+    baseRef: `origin/${baseBranch}`,
+    headRef: remoteRef
+  });
+  const foreignCommits = getForeignCommits(commits);
+
+  return {
+    remoteRef,
+    tipSha,
+    commits,
+    foreignCommits
+  };
+}
+
+export function formatForeignCommitRefusal(headRefName, foreignCommits = []) {
+  const examples = foreignCommits
+    .slice(0, 5)
+    .map((commit) => `${(commit.sha || '').slice(0, 7)} ${commit.subject}`)
+    .join('; ');
+  const extra =
+    foreignCommits.length > 5 ? ` (+${foreignCommits.length - 5} more)` : '';
+
+  return (
+    `Refusing to force-push to ${headRefName}: it contains ` +
+    `${foreignCommits.length} commit(s) Bridge did not create` +
+    `${examples ? ` (${examples}${extra})` : ''}. ` +
+    `Stopped without pushing.`
+  );
+}
+
+export function forceWithLeasePushCommand(headRefName, expectedSha) {
+  const ref = String(headRefName || '').trim();
+  const sha = String(expectedSha || '').trim();
+
+  if (!ref || !sha) {
+    return `git push --force-with-lease origin HEAD:${ref}`;
+  }
+
+  return `git push --force-with-lease=refs/heads/${ref}:${sha} origin HEAD:${ref}`;
 }

@@ -73,6 +73,11 @@ system copy before linking it.
 
 ## Commands
 
+### `bridge --version`
+
+Prints the package version. From a git checkout this includes the short commit
+SHA, for example `0.1.0 (0b81b32)`.
+
 ### `bridge init`
 
 Interactive onboarding that creates `bridge.config.json` in the current directory.
@@ -97,18 +102,21 @@ Runs the patch engine end-to-end:
 - Capture the pre-update vulnerability and Visualizer baselines
 - Install the committed lockfile baseline, then run `beforeScripts`
 - Update dependencies and install the candidate tree, then run `afterScripts`
-- Diff before vs after: only NEW after-script failures block push/PR, including new error output inside a command that already failed on the baseline
+- Diff before vs after: only NEW after-script failures block push/PR, including new error output inside a command that already failed on the baseline. Time-varying noise (`Start at HH:MM:SS`, TAP `duration_ms`, ISO timestamps, pids) is normalized so pre-existing failing vitest/node:test suites do not false-positive
 - Hide untracked `bridge.config.json` from the isolated workspace so repo lint/format scripts do not fail on Bridge's own config
-- Stage only dependency manifests and lockfiles
-- Reject direct major-version changes, new vulnerabilities, and configured bundle regressions (npm, pnpm, and yarn lockfiles)
+- Stage only dependency manifests and lockfiles, never paths under `node_modules/`
+- Reject direct major-version changes, new vulnerabilities, and configured bundle regressions (npm, pnpm, and yarn lockfiles). Yarn classic lockfiles are keyed by package name, so a range rewrite such as `semver@^6` → `semver@^7` is a major bump
 - Save a detailed, redacted `bridge-report.v1.json` for the run, including blocked-run validation/gate evidence
-- Save full redacted stdout and stderr when a command fails
+- Save full redacted stdout and stderr for every failing command when a run is blocked
 - Exit before candidate reinstall/after-scripts when the lockfile did not change
+- `--block-on-baseline-failures` stops after the committed baseline, before the update
 - Commit and push only through the protected-branch guard after every gate passes
-- Reuse or update an open Bridge PR with identical/same-file changes instead of opening a duplicate
+- Reuse an open Bridge PR with identical changes. Update it only when the hidden scope marker matches and the branch contains only Bridge commits; a narrower run opens a new PR instead of replacing a broader one
+- Refresh PR bodies through `gh api` (REST) rather than `gh pr edit`, and never print a success check when the body update failed
 - Create a pull request through an existing GitHub CLI session when available
-- Print pull request/compare URLs and final summary
-- Always cleanup temp directory
+- Print pull request/compare URLs and final summary, using the reused PR's branch name when one is updated
+- Always cleanup the temp directory, including on SIGINT/SIGTERM, and write a partial cancelled report
+- Ignore copied git worktree metadata so a worktree in the source repo cannot break `clean_base`
 
 Useful modes:
 
@@ -302,7 +310,7 @@ Optional fields:
 - `afterScripts`
 - `auditCommand` (npm defaults to `npm audit --package-lock-only --json`; pnpm to `pnpm audit --json`; yarn to `yarn audit --json`)
 - `blockOnNewVulnerabilities` (defaults to `true`)
-- `blockOnBaselineFailures` (defaults to `false`; when true, pre-existing baseline script failures also stop push/PR)
+- `blockOnBaselineFailures` (defaults to `false`; when true, pre-existing baseline script failures stop the run after the baseline, before the update)
 - `auditBlockingSeverities` (defaults to `["critical", "high"]`; severity levels that block when increased)
 - `allowMajorUpdates` (defaults to `false`; applies to direct dependencies)
 - `transitiveMajorPolicy` (defaults to `"warn"`; options: `"block"`, `"warn"`, `"allow"`)
@@ -330,7 +338,8 @@ Notes:
 - Visualizer HTML reports are copied to `~/.bridge/artifacts/<run-id>/<scope>/` and are not added to the patch.
 - `beforeScripts` execute against the committed-lockfile baseline after install-as-needed, and before any update/candidate mutation. `afterScripts` execute after the candidate is installed. Only NEW after-script failures block push/PR. That includes new error lines inside a command that already failed on the baseline. Pre-existing identical baseline failures are reported as already-present and non-blocking unless `blockOnBaselineFailures` is enabled. A command that appears only in `afterScripts` is described as not measured on the baseline, not as "introduced by the update".
 - When clean commands remove a supported lockfile, Bridge restores the committed baseline before the before scripts and restores the candidate lockfile before the after scripts. This prevents `npm install` from resolving an updated dependency tree on both sides of the comparison.
-- npm, pnpm, and yarn lockfiles are parsed for dependency deltas and the direct-major gate. `bridge doctor` warns when a lockfile format cannot be parsed or `auditCommand` is empty.
+- npm, pnpm, and yarn lockfiles are parsed for dependency deltas and the direct-major gate. Yarn classic entries are aggregated by package name. `bridge doctor` warns when a lockfile format cannot be parsed or when no audit command is configured *and* the package manager has no default. Empty `auditCommand` on npm/pnpm/yarn still runs the default audit during `bridge patch`.
+- `bridge --version` prints `0.1.0 (<git sha>)` from a git checkout.
 - When a run is blocked, `failure.log` includes the failing command's stdout and stderr, the report records `validation` / `gateDecisions` / `blockedCount`, and the terminal prints a short excerpt of failing lines (both streams).
 - The Visualizer lives only in `bundleAnalysis`, not in `beforeScripts` or `afterScripts`. Bridge runs it after those arrays on both sides, so it is the last optional validation step rather than a duplicate build path.
 - `bridge patch` pushes only a protected-branch-guarded candidate branch after every gate passes. Use `--dry-run` for a non-mutating simulation.
@@ -359,10 +368,11 @@ Branch names now include a time component for uniqueness: `bridge/patch-YYYY-MM-
 Bridge now captures baseline script results (exit codes and normalized failure output) before the update and compares them with after-update results. Only NEW failures block push/PR:
 
 - Pre-existing baseline failures with the same normalized error set are reported as non-blocking noise
+- Clock times, ISO timestamps, pids, ports, and TAP/vitest duration fields are stripped before comparison
 - A command that still fails but gained new error lines is a NEW failure and hard-stops before push/PR
 - When output changed and Bridge cannot prove it is the same failure, it blocks (conservative)
 - Resolved failures (failures that now pass) are reported as improvements
-- `blockOnBaselineFailures: true` or `--block-on-baseline-failures` also stops on pre-existing baseline failures
+- `blockOnBaselineFailures: true` or `--block-on-baseline-failures` stops after the baseline, before the update, with consistent blocking copy
 
 This prevents flaky or pre-existing lint/test failures from blocking otherwise-good patches, while making a candidate regression an obvious stop.
 

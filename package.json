@@ -17,7 +17,7 @@
   "scripts": {
     "start": "node ./bin/bridge.js",
     "smoke": "node ./bin/bridge.js --help",
-    "test": "node --test"
+    "test": "node --import ./scripts/setup-bridge-home.js --test"
   },
   "engines": {
     "node": ">=18"

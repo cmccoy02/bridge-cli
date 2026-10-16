@@ -1,0 +1,13 @@
+{
+  "name": "corpus-noise-vitest",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Fixture: baseline-failing vitest-style output with Start at HH:MM:SS noise",
+  "scripts": {
+    "lint": "exit 0",
+    "test": "node scripts/vitest-like.mjs"
+  },
+  "dependencies": {
+    "semver": "^7.5.0"
+  }
+}

@@ -9,6 +9,13 @@ const ANSI_RE = /\u001b\[[0-9;]*m/g;
 const TEMP_WORKSPACE_RE = /\/(?:tmp|var\/folders)\/[^\s:'"]*bridge-[^\s:'"]+/gi;
 const ABS_TMP_RE = /(?:\/(?:tmp|private\/tmp|var\/folders)\/[^\s:'"]+)/g;
 const DURATION_RE = /\b\d+(?:\.\d+)?\s*(?:ms|s|m|sec|secs|seconds|minutes)\b/gi;
+const DURATION_MS_KEY_RE = /\bduration_ms:\s*\d+(?:\.\d+)?/gi;
+const CLOCK_TIME_RE = /\b\d{1,2}:\d{2}:\d{2}(?:\.\d+)?\b/g;
+const ISO_TIMESTAMP_RE =
+  /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?/g;
+const PID_RE = /\b(?:pid|PID|process(?:\s+id)?)\s*[:#]?\s*\d+\b/g;
+const PAREN_PID_RE = /\(pid\s+\d+\)/gi;
+const PORT_RE = /\bport\s+\d{2,5}\b/gi;
 
 export function combineCommandStreams(stdout, stderr) {
   const out = String(stdout || '');
@@ -29,6 +36,12 @@ export function normalizeFailureText(text) {
   return stripAnsi(text)
     .replace(TEMP_WORKSPACE_RE, '<workspace>')
     .replace(ABS_TMP_RE, '<tmp>')
+    .replace(ISO_TIMESTAMP_RE, '<timestamp>')
+    .replace(PAREN_PID_RE, '(pid <pid>)')
+    .replace(PID_RE, 'pid <pid>')
+    .replace(PORT_RE, 'port <port>')
+    .replace(DURATION_MS_KEY_RE, 'duration_ms: <time>')
+    .replace(CLOCK_TIME_RE, '<time>')
     .replace(DURATION_RE, '<time>')
     .replace(/\r\n/g, '\n');
 }
@@ -66,6 +79,20 @@ function isNoiseLine(line) {
   }
 
   if (/^npm\s+notice/i.test(trimmed)) {
+    return true;
+  }
+
+  // Vitest / Jest wall-clock banners. The actual FAIL/× rows are kept.
+  if (/^Start at\s+/i.test(trimmed) || /^Duration\s+\d/i.test(trimmed)) {
+    return true;
+  }
+
+  if (/^RUN\s+v?\d/i.test(trimmed)) {
+    return true;
+  }
+
+  // TAP YAML diagnostic keys that only carry timing.
+  if (/^duration_ms:/i.test(trimmed)) {
     return true;
   }
 

@@ -111,6 +111,66 @@ test('yarn lockfile deltas classify direct vs transitive', () => {
   assert.equal(deltas[0].kind, 'direct');
 });
 
+test('yarn classic range rewrites are version bumps, not add+remove', () => {
+  const before = `# yarn lockfile v1
+
+left-pad@^1.3.0:
+  version "1.3.0"
+
+semver@^6.0.0:
+  version "6.3.1"
+`;
+  const after = `# yarn lockfile v1
+
+left-pad@^1.3.0:
+  version "1.3.0"
+
+semver@^7.0.0:
+  version "7.6.3"
+`;
+  const { summary, deltas } = computeDepDeltas({
+    beforeContent: before,
+    afterContent: after,
+    lockfileFormat: 'yarn-lock',
+    directDeps: new Set(['semver', 'left-pad'])
+  });
+  const semver = deltas.find((delta) => delta.name === 'semver');
+
+  assert.equal(summary.added, 0);
+  assert.equal(summary.removed, 0);
+  assert.equal(summary.directChanged, 1);
+  assert.equal(summary.byBump.major, 1);
+  assert.equal(semver.from, '6.3.1');
+  assert.equal(semver.to, '7.6.3');
+  assert.equal(semver.bump, 'major');
+  assert.equal(semver.kind, 'direct');
+});
+
+test('yarn classic descriptor-only range changes are not extra add/remove', () => {
+  const before = `# yarn lockfile v1
+
+ms@^2.1.1:
+  version "2.1.2"
+`;
+  const after = `# yarn lockfile v1
+
+ms@^2.1.3:
+  version "2.1.3"
+`;
+  const { summary, deltas } = computeDepDeltas({
+    beforeContent: before,
+    afterContent: after,
+    lockfileFormat: 'yarn-lock',
+    directDeps: new Set(['ms'])
+  });
+
+  assert.equal(summary.added, 0);
+  assert.equal(summary.removed, 0);
+  assert.equal(summary.byBump.patch, 1);
+  assert.equal(deltas[0].from, '2.1.2');
+  assert.equal(deltas[0].to, '2.1.3');
+});
+
 test('yarn audit NDJSON is parsed for severity counts', () => {
   const parsed = parseAuditJson(
     '{"type":"auditAdvisory","data":{}}\n{"type":"auditSummary","data":{"vulnerabilities":{"info":0,"low":1,"moderate":0,"high":2,"critical":0}}}'

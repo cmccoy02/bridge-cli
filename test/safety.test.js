@@ -6,7 +6,12 @@ import test from 'node:test';
 
 import { cleanupLocalConfigAfterSuccessfulPush } from '../src/core/configLifecycle.js';
 import { runCommand } from '../src/core/executor.js';
-import { getCurrentBranch, prepareCleanBase, pushBridgeBranch } from '../src/core/git.js';
+import {
+  getCurrentBranch,
+  prepareCleanBase,
+  pushBridgeBranch,
+  stripCopiedWorktreeMetadata
+} from '../src/core/git.js';
 
 const cliPath = new URL('../bin/bridge.js', import.meta.url).pathname;
 
@@ -116,6 +121,32 @@ test('prepareCleanBase pulls master and creates the Bridge branch before updates
       .sort(),
     ['bridge/patch-2026-06-05', 'master']
   );
+});
+
+test('prepareCleanBase succeeds after stripping copied worktree metadata', async (t) => {
+  const { repoDir, root } = await createRepoWithOrigin(t, { defaultBranch: 'master' });
+  await git(repoDir, 'checkout -b feature');
+  await fs.writeFile(path.join(repoDir, 'feature.txt'), 'worktree-branch\n', 'utf8');
+  await git(repoDir, 'add feature.txt');
+  await git(repoDir, 'commit -m feature');
+  await git(repoDir, 'checkout master');
+  const worktreeDir = path.join(root, 'wt');
+  await git(repoDir, `worktree add ${quote(worktreeDir)} feature`);
+
+  const copyDir = path.join(root, 'copy');
+  await fs.cp(repoDir, copyDir, { recursive: true });
+  await stripCopiedWorktreeMetadata(copyDir);
+
+  const result = await prepareCleanBase(copyDir, {
+    configuredDefaultBranch: 'master',
+    protectedBranches: [],
+    branchPrefix: 'bridge/patch',
+    dateStamp: '2026-06-05'
+  });
+
+  assert.equal(result.branch, 'master');
+  assert.equal(await getCurrentBranch(copyDir), 'bridge/patch-2026-06-05');
+  assert.equal(await getCurrentBranch(worktreeDir), 'feature');
 });
 
 test('prepareCleanBase detects origin default branch when config omits it', async (t) => {

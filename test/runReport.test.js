@@ -127,6 +127,47 @@ test('failure evidence includes both stdout and stderr', async (t) => {
   assert.match(evidence, /no-console/);
 });
 
+test('failure evidence records every failing command and added error lines', async (t) => {
+  const bridgeHome = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-report-'));
+  const previousBridgeHome = process.env.BRIDGE_HOME;
+  process.env.BRIDGE_HOME = bridgeHome;
+
+  t.after(async () => {
+    if (previousBridgeHome === undefined) {
+      delete process.env.BRIDGE_HOME;
+    } else {
+      process.env.BRIDGE_HOME = previousBridgeHome;
+    }
+    await fs.rm(bridgeHome, { recursive: true, force: true });
+  });
+
+  const failure = Object.assign(new Error('multiple after-script failures'), {
+    command: 'npm run check:format',
+    code: 1,
+    stdout: 'typings/index.d.ts\n',
+    addedErrorLines: ['typings/index.d.ts'],
+    failures: [
+      {
+        command: 'npm run check:format',
+        code: 1,
+        stdout: 'typings/index.d.ts\n'
+      },
+      {
+        command: 'npm test',
+        code: 1,
+        stdout: 'not ok 1\n  duration_ms: 3.3\n'
+      }
+    ]
+  });
+  const failurePath = await writeFailureEvidence('run-multi', failure);
+  const evidence = await fs.readFile(failurePath, 'utf8');
+
+  assert.match(evidence, /npm run check:format/);
+  assert.match(evidence, /npm test/);
+  assert.match(evidence, /Added error lines/);
+  assert.match(evidence, /typings\/index\.d\.ts/);
+});
+
 test('blocked run reports include validation, gate decisions, and blockedCount', async (t) => {
   const bridgeHome = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-report-'));
   const previousBridgeHome = process.env.BRIDGE_HOME;

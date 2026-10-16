@@ -4,8 +4,11 @@ import test from 'node:test';
 import {
   buildPullRequestBody,
   createPullRequest,
+  decidePullRequestReuse,
   findReusableBridgePullRequest,
   getGitHubRepository,
+  makePullRequestScopeKey,
+  parseBridgePrMarker,
   updatePullRequest
 } from '../src/core/pullRequest.js';
 
@@ -227,6 +230,7 @@ test('findReusableBridgePullRequest reuses an identical open Bridge PR', async (
   });
 
   assert.equal(result.identical, true);
+  assert.equal(result.reuseAction, 'reuse_identical');
   assert.equal(result.url, 'https://github.com/example/project/pull/5');
 });
 
@@ -267,9 +271,77 @@ test('findReusableBridgePullRequest matches same files with a different diff', a
   assert.equal(result.identical, false);
   assert.equal(result.sameFiles, true);
   assert.equal(result.number, 5);
+  assert.equal(result.reuseAction, 'open_new');
 });
 
-test('updatePullRequest edits the existing PR body', async () => {
+test('findReusableBridgePullRequest updates only when the scope marker matches', async () => {
+  const localDiff =
+    'diff --git a/package-lock.json b/package-lock.json\n--- a/package-lock.json\n+++ b/package-lock.json\n@@ -1 +1 @@\n-old\n+new\n';
+  const remoteDiff =
+    'diff --git a/package-lock.json b/package-lock.json\n--- a/package-lock.json\n+++ b/package-lock.json\n@@ -1 +1 @@\n-older\n+newer\n';
+  const scopeKey = makePullRequestScopeKey({
+    configSha256: 'abc',
+    requestedScope: 'all',
+    updateCommands: ['npm update']
+  });
+  const result = await findReusableBridgePullRequest({
+    cwd: '/tmp/repo',
+    repoUrl: 'https://github.com/example/project.git',
+    baseBranch: 'main',
+    branchPrefix: 'bridge/patch',
+    stagedDiff: localDiff,
+    scopeKey,
+    commandExistsFn: async () => true,
+    runCommandFn: async (command) => {
+      if (command.startsWith('gh pr list')) {
+        return {
+          success: true,
+          stdout: JSON.stringify([
+            {
+              number: 5,
+              url: 'https://github.com/example/project/pull/5',
+              title: 'bridge: update dependencies (non-breaking)',
+              headRefName: 'bridge/patch-2026-09-30-1426',
+              baseRefName: 'main',
+              body: buildPullRequestBody({
+                branchName: 'bridge/patch-2026-09-30-1426',
+                baseBranch: 'main',
+                scopeMeta: { v: 1, scopeKey }
+              })
+            }
+          ])
+        };
+      }
+      if (command.startsWith('gh pr diff')) {
+        return { success: true, stdout: remoteDiff, stderr: '' };
+      }
+      return { success: false, stdout: '', stderr: 'unexpected' };
+    }
+  });
+
+  assert.equal(result.reuseAction, 'update');
+  assert.equal(result.sameFiles, true);
+});
+
+test('a narrower run does not reuse a broader Bridge PR', () => {
+  const decision = decidePullRequestReuse({
+    identical: false,
+    sameFiles: true,
+    localScopeKey: makePullRequestScopeKey({
+      updateCommands: ['npm update react react-dom']
+    }),
+    remoteMarker: {
+      scopeKey: makePullRequestScopeKey({
+        updateCommands: ['npm update']
+      })
+    }
+  });
+
+  assert.equal(decision.action, 'open_new');
+  assert.match(decision.reason, /different update scope/);
+});
+
+test('updatePullRequest patches the PR body through gh api', async () => {
   const commands = [];
   const result = await updatePullRequest({
     cwd: '/tmp/repo',
@@ -288,7 +360,38 @@ test('updatePullRequest edits the existing PR body', async () => {
   });
 
   assert.equal(result.status, 'updated');
-  assert.match(commands[0], /gh pr edit/);
-  assert.match(commands[0], /--body/);
-  assert.match(commands[0], /report\.json/);
+  assert.match(commands[0], /gh api/);
+  assert.match(commands[0], /-X PATCH/);
+  assert.match(commands[0], /repos\/example\/project\/pulls\/5/);
+  assert.doesNotMatch(commands[0], /gh pr edit/);
+});
+
+test('updatePullRequest reports failure instead of success', async () => {
+  const result = await updatePullRequest({
+    cwd: '/tmp/repo',
+    number: 5,
+    repoUrl: 'https://github.com/example/project.git',
+    body: 'updated body',
+    commandExistsFn: async () => true,
+    runCommandFn: async () => ({
+      success: false,
+      stdout: '',
+      stderr: 'GraphQL: Projects (classic) is being deprecated'
+    })
+  });
+
+  assert.equal(result.status, 'failed');
+  assert.match(result.message, /could not update pull request #5/);
+  assert.match(result.message, /Projects \(classic\)/);
+});
+
+test('PR body includes a hidden scope marker', () => {
+  const body = buildPullRequestBody({
+    branchName: 'bridge/patch-1',
+    baseBranch: 'main',
+    scopeMeta: { v: 1, scopeKey: 'abc' }
+  });
+  const marker = parseBridgePrMarker(body);
+  assert.equal(marker.v, 1);
+  assert.equal(marker.scopeKey, 'abc');
 });

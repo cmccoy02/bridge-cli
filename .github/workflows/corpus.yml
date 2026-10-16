@@ -44,7 +44,7 @@ jobs:
           cache: 'npm'
 
       - name: Enable pnpm via corepack
-        run: corepack enable && corepack prepare pnpm@latest --activate
+        run: corepack enable && corepack prepare pnpm@9.15.0 --activate
 
       - name: Install Bridge CLI dependencies
         run: npm ci
@@ -64,6 +64,8 @@ jobs:
               (cd "$fixture" && pnpm install --frozen-lockfile --ignore-scripts)
             elif [ -f "$fixture/package-lock.json" ]; then
               (cd "$fixture" && npm ci --ignore-scripts)
+            elif [ -f "$fixture/yarn.lock" ]; then
+              echo "Skipping yarn install for $fixture (fixture uses a no-op installCommand)"
             fi
           done
 
@@ -74,7 +76,7 @@ jobs:
         run: node corpus/scripts/run-all.mjs
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         if: always()
         with:
           name: corpus-artifacts
@@ -82,7 +84,7 @@ jobs:
           retention-days: 14
 
       - name: Upload scoreboard
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         if: always()
         with:
           name: corpus-scoreboard

@@ -1,7 +1,5 @@
 #!/usr/bin/env node
 
-import { createRequire } from 'node:module';
-
 import { Command } from 'commander';
 
 import { configCommand } from '../src/commands/config.js';
@@ -9,10 +7,8 @@ import { initCommand } from '../src/commands/init.js';
 import { patchCommand } from '../src/commands/patch.js';
 import { reportCommand } from '../src/commands/report.js';
 import { doctorCommand, validateCommand } from '../src/commands/validate.js';
+import { getBridgeVersion } from '../src/core/bridgeVersion.js';
 import { error } from '../src/ui/logger.js';
-
-const require = createRequire(import.meta.url);
-const packageJson = require('../package.json');
 
 const program = new Command();
 
@@ -23,7 +19,7 @@ function collectOption(value, previous = []) {
 program
   .name('bridge')
   .description('Automated, non-breaking dependency updates. One command. One PR.')
-  .version(packageJson.version);
+  .version(getBridgeVersion());
 
 program
   .command('init')

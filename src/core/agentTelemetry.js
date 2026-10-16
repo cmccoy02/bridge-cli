@@ -198,7 +198,8 @@ export function createEarlyExitReason(reason, details = {}) {
     policy_block: 'Blocked by policy violation',
     audit_block: 'Blocked by security audit regression',
     bundle_block: 'Blocked by bundle size regression',
-    validation_block: 'Blocked by validation script failure'
+    validation_block: 'Blocked by validation script failure',
+    cancelled: 'Run cancelled by signal'
   };
 
   return {

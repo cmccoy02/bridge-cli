@@ -1,0 +1,14 @@
+{
+  "name": "corpus-yarn-major",
+  "packageManager": "yarn",
+  "installCommand": "node -e \"process.exit(0)\"",
+  "updateCommand": "node scripts/apply-major.mjs",
+  "cleanCommands": [],
+  "beforeScripts": ["npm run lint"],
+  "afterScripts": ["npm run lint", "npm run test"],
+  "auditCommand": "node -e \"console.log(JSON.stringify({metadata:{vulnerabilities:{info:0,low:0,moderate:0,high:0,critical:0,total:0}}}))\"",
+  "allowMajorUpdates": false,
+  "pullRequest": {
+    "enabled": false
+  }
+}

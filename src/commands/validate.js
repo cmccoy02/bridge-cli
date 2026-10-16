@@ -6,6 +6,7 @@ import {
   logRunStart,
   makeRunContext
 } from '../core/activityLogger.js';
+import { defaultAuditCommand } from '../core/audit.js';
 import { commandExists, runCommand } from '../core/executor.js';
 import { getOriginUrl, getGitUserConfig } from '../core/git.js';
 import {
@@ -53,6 +54,11 @@ function commandList(value) {
 export function collectDisabledGateNotices(config) {
   const notices = [];
   const managerPreset = PACKAGE_MANAGER_PRESETS[config?.packageManager] || null;
+  const effectiveAuditCommand =
+    (typeof config?.auditCommand === 'string' && config.auditCommand.trim()) ||
+    defaultAuditCommand(config?.packageManager) ||
+    managerPreset?.auditCommand ||
+    '';
 
   if (managerPreset && !managerPreset.lockfileFormat) {
     notices.push(
@@ -60,16 +66,36 @@ export function collectDisabledGateNotices(config) {
     );
   }
 
-  if (!config?.auditCommand) {
+  if (!effectiveAuditCommand) {
+    const example = managerPreset?.auditCommand || defaultAuditCommand('npm') || 'npm audit --json';
     notices.push(
-      'Security audit is inactive: auditCommand is empty. Set auditCommand (for example `pnpm audit --json`) to enable the vulnerability gate.'
+      `Security audit is inactive: no audit command is configured and ${config?.packageManager || 'this package manager'} has no default. Set auditCommand (for example \`${example}\`) to enable the vulnerability gate.`
     );
   }
 
-  const beforeSet = new Set(commandList(config?.beforeScripts));
-  const afterOnlyScripts = commandList(config?.afterScripts).filter(
-    (commandText) => !beforeSet.has(commandText)
-  );
+  if (config?.blockOnNewVulnerabilities === false) {
+    notices.push(
+      'Vulnerability gate is inactive: blockOnNewVulnerabilities is false. New high/critical findings will not stop push/PR.'
+    );
+  }
+
+  if (config?.allowMajorUpdates === true) {
+    notices.push(
+      'Direct-major gate is inactive: allowMajorUpdates is true. Direct major bumps will not stop push/PR.'
+    );
+  }
+
+  const beforeScripts = commandList(config?.beforeScripts);
+  const afterScripts = commandList(config?.afterScripts);
+
+  if (beforeScripts.length === 0 && afterScripts.length === 0) {
+    notices.push(
+      'No beforeScripts or afterScripts are configured. Bridge cannot compare a repo-native baseline to the candidate tree.'
+    );
+  }
+
+  const beforeSet = new Set(beforeScripts);
+  const afterOnlyScripts = afterScripts.filter((commandText) => !beforeSet.has(commandText));
 
   if (afterOnlyScripts.length > 0) {
     notices.push(
