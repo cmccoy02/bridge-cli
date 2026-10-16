@@ -1,0 +1,13 @@
+{
+  "name": "corpus-noise-timestamp",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Fixture: baseline-failing command that prints ISO timestamps and pids",
+  "scripts": {
+    "lint": "exit 0",
+    "test": "node scripts/timestamp.mjs"
+  },
+  "dependencies": {
+    "semver": "^7.5.0"
+  }
+}

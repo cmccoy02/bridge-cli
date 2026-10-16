@@ -37,6 +37,10 @@ corpus/
 │   ├── skip-major/         # Tests allowMajorUpdates policy
 │   ├── new-failure/        # After-update script fails (hard-stop)
 │   ├── masked-failure/     # New errors inside an already-failing command
+│   ├── noise-vitest/       # Baseline-failing vitest-style Start at HH:MM:SS noise
+│   ├── noise-node-test/    # Baseline-failing node:test TAP duration_ms noise
+│   ├── noise-timestamp/    # Baseline-failing ISO timestamp + pid noise
+│   ├── yarn-major/         # Yarn classic range rewrite that is a direct major
 │   ├── pnpm-outdated/      # pnpm lockfile metrics and patch flow
 │   └── .remotes/           # Bare git repos for fixture remotes (gitignored)
 ├── scripts/
