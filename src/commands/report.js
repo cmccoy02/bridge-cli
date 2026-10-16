@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 
 import { getActivityLogPath } from '../core/activityLogger.js';
 import { findSavedRunReport } from '../core/runReport.js';
+import { formatScriptSummaryTable } from '../core/scriptSummary.js';
 import { info, line, section, warn } from '../ui/logger.js';
 import { printSummary } from '../ui/summary.js';
 
@@ -417,6 +418,10 @@ export async function reportCommand({
       line(JSON.stringify(saved.report, null, 2));
     } else {
       formatRunSummary(saved.report, saved.reportPath);
+      if (saved.report?.outcome?.scriptSummary) {
+        line();
+        line(formatScriptSummaryTable(saved.report.outcome.scriptSummary));
+      }
     }
 
     return true;

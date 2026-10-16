@@ -91,7 +91,14 @@ import {
   makePullRequestScopeKey,
   updatePullRequest
 } from '../core/pullRequest.js';
-import { getRunReportPath, writeFailureEvidence, writeRunReport } from '../core/runReport.js';
+import {
+  getRunReportPath,
+  getRunSummaryPath,
+  scriptSummaryFromValidation,
+  writeFailureEvidence,
+  writeRunReport
+} from '../core/runReport.js';
+import { formatScriptSummaryTable, writeScriptCommandLog } from '../core/scriptSummary.js';
 import { collectRuntimeEnvironment } from '../core/runtimeEnvironment.js';
 import { resolvePathInside, resolveRealPathInside } from '../core/pathSafety.js';
 import {
@@ -226,6 +233,7 @@ function buildPatchScopes(config) {
     cleanCommands: Array.isArray(config.cleanCommands) ? config.cleanCommands : [],
     beforeScripts: Array.isArray(config.beforeScripts) ? config.beforeScripts : [],
     afterScripts: Array.isArray(config.afterScripts) ? config.afterScripts : [],
+    skipBeforeScripts: config.skipBeforeScripts === true,
     auditCommand: config.auditCommand || '',
     blockOnNewVulnerabilities: config.blockOnNewVulnerabilities !== false,
     blockOnBaselineFailures: config.blockOnBaselineFailures === true,
@@ -243,6 +251,10 @@ function buildPatchScopes(config) {
           typeof scope.blockOnNewVulnerabilities === 'boolean'
             ? scope.blockOnNewVulnerabilities
             : config.blockOnNewVulnerabilities !== false,
+        skipBeforeScripts:
+          typeof scope.skipBeforeScripts === 'boolean'
+            ? scope.skipBeforeScripts
+            : config.skipBeforeScripts === true,
         blockOnBaselineFailures:
           typeof scope.blockOnBaselineFailures === 'boolean'
             ? scope.blockOnBaselineFailures
@@ -518,6 +530,22 @@ async function runValidationScripts(
     quiet: !verbose
   });
 
+  const scope = groupName.includes(':') ? groupName.split(':').slice(1).join(':') : 'root';
+  const phase = groupName.split(':')[0] || 'scripts';
+
+  for (const [index, result] of results.entries()) {
+    try {
+      result.logPath = await writeScriptCommandLog(run.runId, {
+        phase,
+        scope,
+        index,
+        result
+      });
+    } catch {
+      result.logPath = '';
+    }
+  }
+
   return {
     results,
     failures: results.filter((result) => !result.success)
@@ -768,15 +796,41 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
     }
   }
 
-  const beforeValidation = await runValidationScripts(
-    run,
-    `Running before-update validation on committed baseline (${label})...`,
-    scope.beforeScripts,
-    scopeDir,
-    `beforeScripts:${label}`,
-    verbose,
-    true
-  );
+  const skipBeforeScripts = scope.skipBeforeScripts === true;
+  const baselineCommands = skipBeforeScripts ? scope.afterScripts : scope.beforeScripts;
+  let beforeValidation;
+
+  if (skipBeforeScripts) {
+    info(
+      `${label}: skipBeforeScripts is on. Configured beforeScripts will not run. ` +
+        `Baseline is captured by running afterScripts on the committed lockfile tree.`
+    );
+    await logPhase(run, `beforeScripts:${label}`, 'skipped', {
+      scope: label,
+      reason: 'skipBeforeScripts',
+      skippedCount: scope.beforeScripts.length
+    });
+    beforeValidation = await runValidationScripts(
+      run,
+      `Capturing baseline via after-scripts on committed lockfile (${label})...`,
+      scope.afterScripts,
+      scopeDir,
+      `baselineScripts:${label}`,
+      verbose,
+      true
+    );
+  } else {
+    beforeValidation = await runValidationScripts(
+      run,
+      `Running before-update validation on committed baseline (${label})...`,
+      scope.beforeScripts,
+      scopeDir,
+      `beforeScripts:${label}`,
+      verbose,
+      true
+    );
+  }
+
   const beforeScriptResults = captureScriptResults(beforeValidation.results);
 
   if (beforeValidation.failures.length > 0) {
@@ -827,11 +881,14 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
               scriptDiff: createScriptDiffReport(
                 beforeScriptResults,
                 beforeScriptResults,
-                { beforeCommands: scope.beforeScripts }
+                { beforeCommands: baselineCommands }
               ),
               comparison: baselineComparison,
               blocked: true,
-              blockOnBaselineFailures: true
+              blockOnBaselineFailures: true,
+              skipBeforeScripts,
+              afterScriptsRan: false,
+              afterResults: []
             }
           }
         }
@@ -839,9 +896,11 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
     }
 
     warn(
-      formatBeforeScriptsBaselineNotice(beforeValidation.failures.length, {
-        blockOnBaselineFailures: false
-      })
+      skipBeforeScripts
+        ? `${label}: after-scripts recorded ${beforeValidation.failures.length} failure(s) on the committed baseline (beforeScripts skipped). Pre-existing failures are not blocking; only NEW failures after the update stop push/PR.`
+        : formatBeforeScriptsBaselineNotice(beforeValidation.failures.length, {
+            blockOnBaselineFailures: false
+          })
     );
   }
 
@@ -955,7 +1014,7 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
     }
 
     const baselineComparison = compareScriptResults(beforeScriptResults, beforeScriptResults, {
-      beforeCommands: scope.beforeScripts
+      beforeCommands: baselineCommands
     });
 
     return {
@@ -986,10 +1045,13 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
       validation: {
         label,
         scriptDiff: createScriptDiffReport(beforeScriptResults, beforeScriptResults, {
-          beforeCommands: scope.beforeScripts
+          beforeCommands: baselineCommands
         }),
         comparison: baselineComparison,
-        blocked: false
+        blocked: false,
+        skipBeforeScripts,
+        afterScriptsRan: false,
+        afterResults: []
       }
     };
   }
@@ -1112,12 +1174,15 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
                   validation: {
                     label,
                     scriptDiff: createScriptDiffReport(beforeScriptResults, [], {
-                      beforeCommands: scope.beforeScripts
+                      beforeCommands: baselineCommands
                     }),
                     comparison: compareScriptResults(beforeScriptResults, [], {
-                      beforeCommands: scope.beforeScripts
+                      beforeCommands: baselineCommands
                     }),
-                    blocked: false
+                    blocked: false,
+                    skipBeforeScripts,
+                    afterScriptsRan: false,
+                    afterResults: []
                   }
                 }
               }
@@ -1235,10 +1300,10 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
   const afterScriptResults = captureScriptResults(afterValidation.results);
 
   const scriptComparison = compareScriptResults(beforeScriptResults, afterScriptResults, {
-    beforeCommands: scope.beforeScripts
+    beforeCommands: baselineCommands
   });
   const scriptDiffReport = createScriptDiffReport(beforeScriptResults, afterScriptResults, {
-    beforeCommands: scope.beforeScripts
+    beforeCommands: baselineCommands
   });
   const scriptGate = evaluateScriptValidationGate(scriptComparison, {
     label,
@@ -1351,7 +1416,10 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
       scriptDiff: scriptDiffReport,
       comparison: scriptComparison,
       blocked: scriptGate.shouldBlock,
-      blockOnBaselineFailures
+      blockOnBaselineFailures,
+      skipBeforeScripts,
+      afterScriptsRan: true,
+      afterResults: afterScriptResults
     }
   };
 
@@ -1415,6 +1483,8 @@ export async function patchCommand({
   keepWorkspace = false,
   verbose = false,
   blockOnBaselineFailures = false,
+  skipBeforeScripts = false,
+  runBeforeScripts = false,
   scope: requestedScope = '',
   localPackages: localPackageArguments = []
 } = {}) {
@@ -1440,13 +1510,20 @@ export async function patchCommand({
     config.blockOnBaselineFailures = true;
   }
 
+  if (runBeforeScripts) {
+    config.skipBeforeScripts = false;
+  } else if (skipBeforeScripts) {
+    config.skipBeforeScripts = true;
+  }
+
   await logRunStart(run, {
     packageManager: config.packageManager,
     hasRepoUrl: Boolean(config.repoUrl),
     dryRun,
     keepWorkspace,
     verbose,
-    requestedScope
+    requestedScope,
+    skipBeforeScripts: config.skipBeforeScripts === true
   });
 
   printBanner();
@@ -1455,6 +1532,13 @@ export async function patchCommand({
   info(`Mode: ${dryRun ? 'dry run (no commit or push)' : 'commit and push'}`);
   info(`Scope: ${requestedScope ? scopeLabel(normalizeScopePath(requestedScope)) : 'all'}`);
   info(`Command output: ${verbose ? 'streaming' : 'condensed'}`);
+  info(
+    `Before-scripts: ${
+      config.skipBeforeScripts
+        ? 'skipped (baseline captured via afterScripts on the committed lockfile tree)'
+        : 'enabled'
+    }`
+  );
   info(`Log file: ${getActivityLogPath()}`);
   line();
 
@@ -1565,7 +1649,8 @@ export async function patchCommand({
         phaseTiming,
         skippedCount,
         blockedCount,
-        environment: runtimeEnvironment
+        environment: runtimeEnvironment,
+        skipBeforeScripts: config?.skipBeforeScripts === true
       });
       runReportPath = savedReport.reportPath;
       warn(`Run cancelled (${signal}). Partial report: ${runReportPath}`);
@@ -2136,7 +2221,8 @@ export async function patchCommand({
         phaseTiming,
         skippedCount,
         blockedCount,
-        environment: runtimeEnvironment
+        environment: runtimeEnvironment,
+        skipBeforeScripts: config?.skipBeforeScripts === true
       });
       runReportPath = savedReport.reportPath;
     } catch (reportError) {
@@ -2301,5 +2387,13 @@ export async function patchCommand({
         'Bridge complete'
       );
     }
+
+    const compactSummary = scriptSummaryFromValidation(validationResults, {
+      skipBeforeScripts: config?.skipBeforeScripts === true,
+      earlyExit
+    });
+    line();
+    line(formatScriptSummaryTable(compactSummary));
+    info(`Summary file: ${getRunSummaryPath(run.runId)}`);
   }
 }

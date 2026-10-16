@@ -14,6 +14,7 @@ import {
 import {
   findSavedRunReport,
   getRunFailurePath,
+  getRunSummaryPath,
   writeFailureEvidence,
   writeRunReport
 } from '../src/core/runReport.js';
@@ -199,7 +200,17 @@ test('blocked run reports include validation, gate decisions, and blockedCount',
           baselineFailureCount: 0,
           resolvedCount: 0,
           newFailures: [{ command: 'npm test', exitCode: 1, outputChanged: true }]
-        }
+        },
+        afterScriptsRan: true,
+        afterResults: [
+          {
+            command: 'npm test',
+            success: false,
+            durationMs: 12,
+            exitCode: 1,
+            logPath: '/tmp/npm-test.log'
+          }
+        ]
       }
     ],
     auditResults: [
@@ -218,6 +229,12 @@ test('blocked run reports include validation, gate decisions, and blockedCount',
   assert.ok(report.outcome.blockedCount >= 1);
   assert.equal(report.outcome.earlyExit.code, 'validation_block');
   assert.equal(report.environment.npmVersion, '10.9.8');
+  assert.ok(report.outcome.scriptSummary);
+  assert.equal(report.outcome.scriptSummary.scripts[0].name, 'npm test');
+  assert.equal(report.outcome.scriptSummary.scripts[0].failureKind, 'new');
+  const summaryMarkdown = await fs.readFile(getRunSummaryPath(run.runId), 'utf8');
+  assert.match(summaryMarkdown, /npm test/);
+  assert.match(summaryMarkdown, /After-script summary|# Bridge after-script summary/);
 });
 
 test('blocked baseline failures are recorded as failed validation gates', async (t) => {

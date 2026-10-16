@@ -41,6 +41,14 @@ program
     '--block-on-baseline-failures',
     'Stop before push/PR when before-scripts already fail on the committed baseline'
   )
+  .option(
+    '--skip-before-scripts',
+    'Skip configured beforeScripts; capture baseline by running afterScripts on the committed lockfile tree'
+  )
+  .option(
+    '--run-before-scripts',
+    'Force beforeScripts to run even when skipBeforeScripts is set in config'
+  )
   .option('--scope <path>', 'Run only the root (.) or one configured nested scope')
   .option(
     '--local-package <name=path>',
@@ -54,6 +62,8 @@ program
       keepWorkspace: options.keepWorkspace,
       verbose: options.verbose,
       blockOnBaselineFailures: options.blockOnBaselineFailures,
+      skipBeforeScripts: options.skipBeforeScripts,
+      runBeforeScripts: options.runBeforeScripts,
       scope: options.scope,
       localPackages: options.localPackage
     });

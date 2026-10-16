@@ -6,6 +6,7 @@
   "cleanCommands": ["rm -rf node_modules"],
   "beforeScripts": [],
   "afterScripts": [],
+  "skipBeforeScripts": false,
     "auditCommand": "npm audit --package-lock-only --json",
     "blockOnNewVulnerabilities": true,
     "blockOnBaselineFailures": false,

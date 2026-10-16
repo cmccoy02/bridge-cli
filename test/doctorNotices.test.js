@@ -48,6 +48,22 @@ test('doctor warns when audit has no default and other gates are off', () => {
   assert.ok(notices.some((notice) => /No beforeScripts or afterScripts/.test(notice)));
 });
 
+test('doctor explains skipBeforeScripts and does not warn about after-only scripts', () => {
+  const notices = collectDisabledGateNotices({
+    packageManager: 'npm',
+    auditCommand: 'npm audit --json',
+    skipBeforeScripts: true,
+    beforeScripts: ['npm run typecheck'],
+    afterScripts: ['npm run typecheck', 'npm run lint:ci']
+  });
+
+  assert.ok(notices.some((notice) => /beforeScripts are skipped/.test(notice)));
+  assert.equal(
+    notices.some((notice) => /cannot be compared to a committed baseline/.test(notice)),
+    false
+  );
+});
+
 test('doctor warns about after-only scripts', () => {
   const notices = collectDisabledGateNotices({
     packageManager: 'npm',

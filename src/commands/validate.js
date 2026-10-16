@@ -87,20 +87,33 @@ export function collectDisabledGateNotices(config) {
 
   const beforeScripts = commandList(config?.beforeScripts);
   const afterScripts = commandList(config?.afterScripts);
+  const skipBeforeScripts = config?.skipBeforeScripts === true;
 
-  if (beforeScripts.length === 0 && afterScripts.length === 0) {
+  if (skipBeforeScripts) {
     notices.push(
-      'No beforeScripts or afterScripts are configured. Bridge cannot compare a repo-native baseline to the candidate tree.'
+      'beforeScripts are skipped (skipBeforeScripts). Baseline is captured by running afterScripts on the committed lockfile tree before the update.'
     );
-  }
 
-  const beforeSet = new Set(beforeScripts);
-  const afterOnlyScripts = afterScripts.filter((commandText) => !beforeSet.has(commandText));
+    if (afterScripts.length === 0) {
+      notices.push(
+        'No afterScripts are configured. With skipBeforeScripts, Bridge cannot compare a repo-native baseline to the candidate tree.'
+      );
+    }
+  } else {
+    if (beforeScripts.length === 0 && afterScripts.length === 0) {
+      notices.push(
+        'No beforeScripts or afterScripts are configured. Bridge cannot compare a repo-native baseline to the candidate tree.'
+      );
+    }
 
-  if (afterOnlyScripts.length > 0) {
-    notices.push(
-      `afterScripts includes command(s) not in beforeScripts (${afterOnlyScripts.join(', ')}). Failures in those commands cannot be compared to a committed baseline.`
-    );
+    const beforeSet = new Set(beforeScripts);
+    const afterOnlyScripts = afterScripts.filter((commandText) => !beforeSet.has(commandText));
+
+    if (afterOnlyScripts.length > 0) {
+      notices.push(
+        `afterScripts includes command(s) not in beforeScripts (${afterOnlyScripts.join(', ')}). Failures in those commands cannot be compared to a committed baseline.`
+      );
+    }
   }
 
   return notices;

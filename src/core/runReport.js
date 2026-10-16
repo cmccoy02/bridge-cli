@@ -5,6 +5,12 @@ import { getActivityLogPath, getBridgeHome } from './activityLogger.js';
 import { AGENT_TELEMETRY_SCHEMA_VERSION, getAgentEventStreamPath } from './agentTelemetry.js';
 import { redactActivityPayload, redactSensitiveText } from './redaction.js';
 import { formatValidationGateReason } from './scriptDiff.js';
+import {
+  buildScriptSummary,
+  buildScriptSummaryRows,
+  getRunSummaryPath,
+  writeRunSummaryFile
+} from './scriptSummary.js';
 
 export const RUN_REPORT_SCHEMA_VERSION = 'bridge-report.v1';
 
@@ -43,6 +49,8 @@ export function getRunReportPath(runId) {
 export function getRunFailurePath(runId) {
   return path.join(getRunDirectory(runId), 'failure.log');
 }
+
+export { getRunSummaryPath };
 
 function commandFailureDetails(error) {
   if (!error) {
@@ -379,8 +387,52 @@ function summarizeValidation(results = []) {
       hasBaselineNoise: entry.comparison?.hasBaselineNoise || false,
       newFailureCount: entry.comparison?.newFailureCount || 0,
       baselineFailureCount: entry.comparison?.baselineFailureCount || 0,
-      resolvedCount: entry.comparison?.resolvedCount || 0
+      resolvedCount: entry.comparison?.resolvedCount || 0,
+      skipBeforeScripts: entry.skipBeforeScripts === true,
+      afterScriptsRan: entry.afterScriptsRan === true
     }));
+}
+
+export function scriptSummaryFromValidation(
+  validationResults = [],
+  { skipBeforeScripts = false, earlyExit = null } = {}
+) {
+  const rows = [];
+  let afterScriptsRan = false;
+
+  for (const entry of validationResults || []) {
+    const afterResults = Array.isArray(entry.afterResults)
+      ? entry.afterResults
+      : (entry.scriptDiff?.after?.scripts || []).map((script) => ({
+          command: script.command,
+          success: script.success,
+          durationMs: script.durationMs,
+          exitCode: script.exitCode,
+          logPath: script.logPath || ''
+        }));
+
+    if (entry.afterScriptsRan === true || afterResults.length > 0) {
+      afterScriptsRan = afterScriptsRan || entry.afterScriptsRan !== false;
+    }
+
+    rows.push(
+      ...buildScriptSummaryRows({
+        scope: entry.label || 'root',
+        afterResults,
+        comparison: entry.comparison,
+        ran: entry.afterScriptsRan !== false && afterResults.length > 0
+      })
+    );
+  }
+
+  return buildScriptSummary({
+    skipBeforeScripts:
+      skipBeforeScripts === true ||
+      (validationResults || []).some((entry) => entry.skipBeforeScripts === true),
+    afterScriptsRan,
+    earlyExit: typeof earlyExit === 'string' ? earlyExit : earlyExit?.code || null,
+    rows
+  });
 }
 
 function collectGateDecisions(auditResults, validationResults, bundleResults) {
@@ -468,7 +520,9 @@ export async function writeRunReport({
   phaseTiming = {},
   skippedCount = 0,
   blockedCount = 0,
-  environment = null
+  environment = null,
+  scriptSummary = null,
+  skipBeforeScripts = false
 } = {}) {
   const events = await readRunEvents(run.runId);
   const finishedEvent = [...events].reverse().find((event) => event.event === 'run_finished');
@@ -482,6 +536,12 @@ export async function writeRunReport({
   const resolvedBundles =
     bundleResults.length > 0 ? summarizeBundles(bundleResults) : bundlesFromEvents(events);
   const resolvedValidation = summarizeValidation(validationResults);
+  const resolvedScriptSummary =
+    scriptSummary ||
+    scriptSummaryFromValidation(validationResults, {
+      skipBeforeScripts,
+      earlyExit
+    });
   const gateDecisions = collectGateDecisions(auditResults, validationResults, bundleResults);
   const failedGates = gateDecisions.filter((decision) => !decision.passed).length;
   const resolvedBlockedCount = Math.max(blockedCount || 0, failedGates);
@@ -537,6 +597,7 @@ export async function writeRunReport({
       audits: resolvedAudits,
       bundles: resolvedBundles,
       validation: resolvedValidation,
+      scriptSummary: resolvedScriptSummary,
       gateDecisions,
       pullRequest,
       failure: commandFailureDetails(failure),
@@ -548,14 +609,33 @@ export async function writeRunReport({
     phases: events
       .filter((event) => event.event === 'phase')
       .map(({ event, at, runId, command, ...phase }) => ({ at, ...phase })),
-    artifacts: collectArtifactPaths(events, failurePath),
+    artifacts: [
+      ...collectArtifactPaths(events, failurePath),
+      ...resolvedScriptSummary.scripts
+        .map((row) => row.logPath)
+        .filter((logPath) => typeof logPath === 'string' && logPath)
+    ],
     agentEventStream: agentEventStreamPath
   });
 
   const reportPath = getRunReportPath(run.runId);
   await fs.mkdir(path.dirname(reportPath), { recursive: true });
   await fs.writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
-  return { report, reportPath };
+
+  let summaryPath = '';
+  try {
+    summaryPath = await writeRunSummaryFile(run.runId, resolvedScriptSummary, {
+      status
+    });
+    if (summaryPath && !report.artifacts.includes(summaryPath)) {
+      report.artifacts.push(summaryPath);
+      await fs.writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
+    }
+  } catch {
+    // A missing markdown summary must not fail the JSON report write.
+  }
+
+  return { report, reportPath, summaryPath };
 }
 
 export async function findSavedRunReport(runId = '') {
