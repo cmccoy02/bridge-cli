@@ -6,7 +6,10 @@ import {
   createPullRequest,
   decidePullRequestReuse,
   findReusableBridgePullRequest,
+  getForeignPullRequestCommits,
   getGitHubRepository,
+  getStablePullRequestIdentity,
+  isBridgeAuthoredCommit,
   makePullRequestScopeKey,
   parseBridgePrMarker,
   updatePullRequest
@@ -234,7 +237,7 @@ test('findReusableBridgePullRequest reuses an identical open Bridge PR', async (
   assert.equal(result.url, 'https://github.com/example/project/pull/5');
 });
 
-test('findReusableBridgePullRequest matches same files with a different diff', async () => {
+test('findReusableBridgePullRequest updates a legacy Bridge PR with no reuse marker', async () => {
   const localDiff =
     'diff --git a/package-lock.json b/package-lock.json\n--- a/package-lock.json\n+++ b/package-lock.json\n@@ -1 +1 @@\n-old\n+new\n';
   const remoteDiff =
@@ -271,7 +274,7 @@ test('findReusableBridgePullRequest matches same files with a different diff', a
   assert.equal(result.identical, false);
   assert.equal(result.sameFiles, true);
   assert.equal(result.number, 5);
-  assert.equal(result.reuseAction, 'open_new');
+  assert.equal(result.reuseAction, 'update');
 });
 
 test('findReusableBridgePullRequest updates only when the scope marker matches', async () => {
@@ -326,7 +329,6 @@ test('findReusableBridgePullRequest updates only when the scope marker matches',
 test('a narrower run does not reuse a broader Bridge PR', () => {
   const decision = decidePullRequestReuse({
     identical: false,
-    sameFiles: true,
     localScopeKey: makePullRequestScopeKey({
       updateCommands: ['npm update react react-dom']
     }),
@@ -339,6 +341,256 @@ test('a narrower run does not reuse a broader Bridge PR', () => {
 
   assert.equal(decision.action, 'open_new');
   assert.match(decision.reason, /different update scope/);
+});
+
+test('reuse identity is update config/command — not the changed package list', () => {
+  const shared = {
+    configSha256: 'abc',
+    requestedScope: 'all',
+    updateCommands: ['npm update']
+  };
+
+  assert.equal(
+    makePullRequestScopeKey({ ...shared, directPackages: ['lodash'] }),
+    makePullRequestScopeKey({ ...shared, directPackages: ['react', 'lodash'] })
+  );
+  assert.equal(makePullRequestScopeKey(shared), 'abc|all|npm update');
+  assert.equal(
+    getStablePullRequestIdentity(makePullRequestScopeKey(shared)),
+    getStablePullRequestIdentity('abc|all|npm update|lodash,react')
+  );
+});
+
+test('a new registry date updates the open Bridge PR when identity matches', () => {
+  const identity = makePullRequestScopeKey({
+    configSha256: 'abc',
+    updateCommands: ['npm update']
+  });
+  const decision = decidePullRequestReuse({
+    identical: false,
+    localScopeKey: identity,
+    remoteMarker: { scopeKey: 'abc|all|npm update|lodash' }
+  });
+
+  assert.equal(decision.action, 'update');
+});
+
+test('legacy Bridge PRs without a reuse marker are updated', () => {
+  const decision = decidePullRequestReuse({
+    identical: false,
+    localScopeKey: makePullRequestScopeKey({
+      updateCommands: ['npm update']
+    }),
+    remoteMarker: null
+  });
+
+  assert.equal(decision.action, 'update');
+});
+
+test('reviewer commits are foreign even when the subject uses the Bridge prefix', () => {
+  const commits = [
+    {
+      messageHeadline: 'bridge: update dependencies (non-breaking)',
+      authors: [{ name: 'Bridge', email: 'bridge@example.test', login: 'bridge-cli' }]
+    },
+    {
+      messageHeadline: 'bridge: update dependencies (non-breaking)',
+      authors: [{ name: 'Reviewer', email: 'reviewer@example.test', login: 'reviewer' }]
+    }
+  ];
+
+  assert.equal(isBridgeAuthoredCommit(commits[0]), true);
+  assert.equal(isBridgeAuthoredCommit(commits[1]), false);
+  assert.equal(getForeignPullRequestCommits(commits).length, 1);
+  assert.equal(getForeignPullRequestCommits(commits)[0].authors[0].login, 'reviewer');
+
+  const decision = decidePullRequestReuse({
+    identical: false,
+    localScopeKey: 'abc',
+    remoteMarker: { scopeKey: 'abc' },
+    foreignCommits: getForeignPullRequestCommits(commits)
+  });
+
+  assert.equal(decision.action, 'open_new');
+  assert.match(decision.reason, /did not author/);
+});
+
+test('findReusableBridgePullRequest updates when the package set and files change', async () => {
+  const localDiff =
+    'diff --git a/package-lock.json b/package-lock.json\n--- a/package-lock.json\n+++ b/package-lock.json\n@@ -1 +1 @@\n-old\n+new\n' +
+    'diff --git a/package.json b/package.json\n--- a/package.json\n+++ b/package.json\n@@ -1 +1 @@\n-old\n+new\n';
+  const remoteDiff =
+    'diff --git a/package-lock.json b/package-lock.json\n--- a/package-lock.json\n+++ b/package-lock.json\n@@ -1 +1 @@\n-older\n+newer\n';
+  const localScopeKey = makePullRequestScopeKey({
+    configSha256: 'abc',
+    updateCommands: ['npm update']
+  });
+  const remoteScopeKey = 'abc|all|npm update|lodash';
+  const result = await findReusableBridgePullRequest({
+    cwd: '/tmp/repo',
+    repoUrl: 'https://github.com/example/project.git',
+    baseBranch: 'main',
+    branchPrefix: 'bridge/patch',
+    stagedDiff: localDiff,
+    scopeKey: localScopeKey,
+    commandExistsFn: async () => true,
+    runCommandFn: async (command) => {
+      if (command.startsWith('gh pr list')) {
+        return {
+          success: true,
+          stdout: JSON.stringify([
+            {
+              number: 9,
+              url: 'https://github.com/example/project/pull/9',
+              title: 'bridge: update dependencies (non-breaking)',
+              headRefName: 'bridge/patch-2026-10-01',
+              baseRefName: 'main',
+              body: buildPullRequestBody({
+                branchName: 'bridge/patch-2026-10-01',
+                baseBranch: 'main',
+                scopeMeta: { v: 1, scopeKey: remoteScopeKey }
+              }),
+              author: { login: 'bridge-cli', name: 'Bridge' },
+              commits: [
+                {
+                  messageHeadline: 'bridge: update dependencies (non-breaking)',
+                  authors: [{ name: 'Bridge', email: 'bridge@example.test', login: 'bridge-cli' }]
+                }
+              ]
+            }
+          ])
+        };
+      }
+      if (command.startsWith('gh pr diff')) {
+        return { success: true, stdout: remoteDiff, stderr: '' };
+      }
+      return { success: false, stdout: '', stderr: 'unexpected' };
+    }
+  });
+
+  assert.equal(result.identical, false);
+  assert.equal(result.sameFiles, false);
+  assert.equal(result.number, 9);
+  assert.equal(result.reuseAction, 'update');
+});
+
+test('findReusableBridgePullRequest prefers the oldest matching open Bridge PR', async () => {
+  const localDiff =
+    'diff --git a/package-lock.json b/package-lock.json\n--- a/package-lock.json\n+++ b/package-lock.json\n@@ -1 +1 @@\n-old\n+new\n';
+  const remoteDiff =
+    'diff --git a/package-lock.json b/package-lock.json\n--- a/package-lock.json\n+++ b/package-lock.json\n@@ -1 +1 @@\n-older\n+newer\n';
+  const scopeKey = makePullRequestScopeKey({
+    configSha256: 'abc',
+    updateCommands: ['npm update']
+  });
+  const result = await findReusableBridgePullRequest({
+    cwd: '/tmp/repo',
+    repoUrl: 'https://github.com/example/project.git',
+    baseBranch: 'main',
+    branchPrefix: 'bridge/patch',
+    stagedDiff: localDiff,
+    scopeKey,
+    commandExistsFn: async () => true,
+    runCommandFn: async (command) => {
+      if (command.startsWith('gh pr list')) {
+        return {
+          success: true,
+          stdout: JSON.stringify([
+            {
+              number: 10,
+              url: 'https://github.com/example/project/pull/10',
+              title: 'bridge: update dependencies (non-breaking)',
+              headRefName: 'bridge/patch-2026-10-02',
+              baseRefName: 'main',
+              body: buildPullRequestBody({
+                branchName: 'bridge/patch-2026-10-02',
+                baseBranch: 'main',
+                scopeMeta: { v: 1, scopeKey }
+              })
+            },
+            {
+              number: 9,
+              url: 'https://github.com/example/project/pull/9',
+              title: 'bridge: update dependencies (non-breaking)',
+              headRefName: 'bridge/patch-2026-10-01',
+              baseRefName: 'main',
+              body: buildPullRequestBody({
+                branchName: 'bridge/patch-2026-10-01',
+                baseBranch: 'main',
+                scopeMeta: { v: 1, scopeKey: `${scopeKey}|lodash` }
+              })
+            }
+          ])
+        };
+      }
+      if (command.startsWith('gh pr diff')) {
+        return { success: true, stdout: remoteDiff, stderr: '' };
+      }
+      return { success: false, stdout: '', stderr: 'unexpected' };
+    }
+  });
+
+  assert.equal(result.number, 9);
+  assert.equal(result.reuseAction, 'update');
+});
+
+test('findReusableBridgePullRequest refuses to update over reviewer-authored commits', async () => {
+  const localDiff =
+    'diff --git a/package-lock.json b/package-lock.json\n--- a/package-lock.json\n+++ b/package-lock.json\n@@ -1 +1 @@\n-old\n+new\n';
+  const remoteDiff =
+    'diff --git a/package-lock.json b/package-lock.json\n--- a/package-lock.json\n+++ b/package-lock.json\n@@ -1 +1 @@\n-older\n+newer\n';
+  const scopeKey = makePullRequestScopeKey({
+    configSha256: 'abc',
+    updateCommands: ['npm update']
+  });
+  const result = await findReusableBridgePullRequest({
+    cwd: '/tmp/repo',
+    repoUrl: 'https://github.com/example/project.git',
+    baseBranch: 'main',
+    branchPrefix: 'bridge/patch',
+    stagedDiff: localDiff,
+    scopeKey,
+    commandExistsFn: async () => true,
+    runCommandFn: async (command) => {
+      if (command.startsWith('gh pr list')) {
+        return {
+          success: true,
+          stdout: JSON.stringify([
+            {
+              number: 9,
+              url: 'https://github.com/example/project/pull/9',
+              title: 'bridge: update dependencies (non-breaking)',
+              headRefName: 'bridge/patch-2026-10-01',
+              baseRefName: 'main',
+              body: buildPullRequestBody({
+                branchName: 'bridge/patch-2026-10-01',
+                baseBranch: 'main',
+                scopeMeta: { v: 1, scopeKey }
+              }),
+              author: { login: 'bridge-cli', name: 'Bridge' },
+              commits: [
+                {
+                  messageHeadline: 'bridge: update dependencies (non-breaking)',
+                  authors: [{ name: 'Bridge', email: 'bridge@example.test', login: 'bridge-cli' }]
+                },
+                {
+                  messageHeadline: 'bridge: update dependencies (non-breaking)',
+                  authors: [{ name: 'Reviewer', email: 'reviewer@example.test', login: 'reviewer' }]
+                }
+              ]
+            }
+          ])
+        };
+      }
+      if (command.startsWith('gh pr diff')) {
+        return { success: true, stdout: remoteDiff, stderr: '' };
+      }
+      return { success: false, stdout: '', stderr: 'unexpected' };
+    }
+  });
+
+  assert.equal(result.reuseAction, 'open_new');
+  assert.match(result.reuseReason, /did not author/);
 });
 
 test('updatePullRequest patches the PR body through gh api', async () => {
