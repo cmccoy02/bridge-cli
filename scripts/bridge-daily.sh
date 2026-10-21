@@ -14,7 +14,7 @@
 # Options:
 #   --repo <url|path>     Required. Git URL to clone, or an existing checkout.
 #   --branch <name>       Default branch to check out (default: origin/HEAD).
-#   --workdir <dir>       Dedicated clone/worktree directory (default:
+#   --workdir <dir>       Dedicated clone directory (default:
 #                         $BRIDGE_HOME/schedule/repos/<name>). Local checkouts
 #                         always run here — never in the developer's tree.
 #   --summary-dir <dir>   Dated summary destination (default:
@@ -88,7 +88,7 @@ resolve_branch() {
   printf '%s' "$resolved"
 }
 
-# Update an isolated clone/worktree. Never run this against a developer's checkout.
+# Update an isolated clone. Never run this against a developer's checkout.
 checkout_isolated_ref() {
   local dir="$1"
   local ref="$2"
@@ -218,8 +218,8 @@ release_lock() {
   fi
 }
 
-# Local mode: never `git checkout` in the developer's repo. Use a detached
-# worktree or, if that fails, a dedicated clone under --workdir.
+# Local mode: never `git checkout`, `git worktree`, or branch creation in the
+# developer's repo. Always use a dedicated plain clone under --workdir.
 prepare_local_workdir() {
   local source="$1"
   local source_abs
@@ -247,11 +247,15 @@ prepare_local_workdir() {
     exit 1
   fi
 
-  git -C "$source_abs" worktree prune --expire now >/dev/null 2>&1 || true
-
+  # Reuse a previous dedicated clone. Replace leftover linked worktrees so
+  # Bridge never shares the developer's .git (that created bridge/patch-*
+  # branches in the source repo and failed with "already used by worktree").
   if is_git_checkout "$workdir"; then
-    checkout_isolated_ref "$workdir" "$branch"
-    return 0
+    if [[ -d "$workdir/.git" ]]; then
+      checkout_isolated_ref "$workdir" "$branch"
+      return 0
+    fi
+    git -C "$source_abs" worktree remove --force "$workdir" >/dev/null 2>&1 || rm -rf "$workdir"
   fi
 
   mkdir -p "$(dirname "$workdir")"
@@ -261,16 +265,6 @@ prepare_local_workdir() {
   if [[ -e "$workdir" ]]; then
     echo "error: workdir exists and is not a git checkout: $workdir" >&2
     exit 1
-  fi
-
-  local start_ref="origin/$branch"
-  if ! git -C "$source_abs" rev-parse --verify "$start_ref" >/dev/null 2>&1; then
-    start_ref="$branch"
-  fi
-
-  if git -C "$source_abs" worktree add --detach "$workdir" "$start_ref" >/dev/null; then
-    checkout_isolated_ref "$workdir" "$branch"
-    return 0
   fi
 
   git clone "$source_abs" "$workdir"

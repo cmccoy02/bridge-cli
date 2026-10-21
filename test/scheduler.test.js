@@ -7,6 +7,7 @@ import test from 'node:test';
 import { runCommand } from '../src/core/executor.js';
 
 const wrapperPath = new URL('../scripts/bridge-daily.sh', import.meta.url).pathname;
+const cliPath = new URL('../bin/bridge.js', import.meta.url).pathname;
 const crontabExamplePath = new URL('../scripts/schedule/crontab.example', import.meta.url)
   .pathname;
 const launchdExamplePath = new URL(
@@ -259,6 +260,97 @@ test('wrapper still refuses a local checkout with non-config dirty files', async
   assert.match(`${result.stdout}\n${result.stderr}`, /dirty worktree/);
 });
 
+function emptyAuditJson() {
+  return JSON.stringify({
+    metadata: {
+      vulnerabilities: {
+        info: 0,
+        low: 0,
+        moderate: 0,
+        high: 0,
+        critical: 0,
+        total: 0
+      }
+    }
+  });
+}
+
+function packageLock(version) {
+  return {
+    name: 'fixture',
+    lockfileVersion: 3,
+    packages: {
+      '': {
+        name: 'fixture',
+        dependencies: {
+          example: '^1.0.0'
+        }
+      },
+      'node_modules/example': {
+        version
+      }
+    }
+  };
+}
+
+async function writeDailyPatchFixture(checkout) {
+  const config = {
+    name: 'daily-real-cli-fixture',
+    packageManager: 'npm',
+    installCommand: 'node -e "process.exit(0)"',
+    updateCommand:
+      'node -e "const fs=require(\'fs\');const p=JSON.parse(fs.readFileSync(\'package-lock.json\',\'utf8\'));p.packages[\'node_modules/example\'].version=\'1.0.1\';fs.writeFileSync(\'package-lock.json\',JSON.stringify(p,null,2)+\'\\\\n\')"',
+    cleanCommands: ['rm -f package-lock.json'],
+    beforeScripts: ['node -e "process.exit(0)"'],
+    afterScripts: [
+      'node -e "const p=require(\'./package-lock.json\'); if (p.packages[\'node_modules/example\'].version !== \'1.0.1\') process.exit(1)"'
+    ],
+    auditCommand: `node -e 'console.log(${JSON.stringify(emptyAuditJson())})'`,
+    blockOnNewVulnerabilities: true,
+    pullRequest: { enabled: false },
+    branchPrefix: 'bridge/test',
+    defaultBranch: 'main'
+  };
+
+  await fs.writeFile(
+    path.join(checkout, 'package.json'),
+    `${JSON.stringify({ name: 'fixture', dependencies: { example: '^1.0.0' } }, null, 2)}\n`,
+    'utf8'
+  );
+  await fs.writeFile(
+    path.join(checkout, 'package-lock.json'),
+    `${JSON.stringify(packageLock('1.0.0'), null, 2)}\n`,
+    'utf8'
+  );
+  await fs.writeFile(
+    path.join(checkout, 'bridge.config.json'),
+    `${JSON.stringify(config, null, 2)}\n`,
+    'utf8'
+  );
+  await git(checkout, 'add package.json package-lock.json bridge.config.json');
+  await git(checkout, 'commit -m "add daily real-cli fixture"');
+  await git(checkout, 'push origin main');
+}
+
+async function assertDedicatedClone(checkout, isolated) {
+  const gitStat = await fs.lstat(path.join(isolated, '.git'));
+  assert.equal(gitStat.isDirectory(), true, 'isolated workdir must be a plain clone, not a linked worktree');
+
+  const isolatedCommon = path.resolve(
+    isolated,
+    (await git(isolated, 'rev-parse --git-common-dir')).stdout.trim()
+  );
+  const sourceCommon = path.resolve(
+    checkout,
+    (await git(checkout, 'rev-parse --git-common-dir')).stdout.trim()
+  );
+  assert.notEqual(isolatedCommon, sourceCommon);
+
+  const worktrees = (await git(checkout, 'worktree list --porcelain')).stdout;
+  assert.doesNotMatch(worktrees, new RegExp(isolated.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.doesNotMatch((await git(checkout, 'branch --list')).stdout, /bridge\//);
+}
+
 test('wrapper does not change the developer checkout branch', async (t) => {
   const { root, checkout } = await createLocalCheckout(t);
   const bridgeHome = path.join(root, 'bridge-home');
@@ -283,6 +375,39 @@ test('wrapper does not change the developer checkout branch', async (t) => {
   const isolatedHead = (await git(isolated, 'rev-parse --abbrev-ref HEAD')).stdout.trim();
   assert.equal(isolatedHead, 'HEAD');
   await fs.access(path.join(isolated, 'bridge.config.json'));
+  await assertDedicatedClone(checkout, isolated);
+});
+
+test('wrapper local --dry-run uses the real Bridge CLI on a dedicated clone', async (t) => {
+  const { root, checkout } = await createLocalCheckout(t);
+  const bridgeHome = path.join(root, 'bridge-home');
+  await writeDailyPatchFixture(checkout);
+
+  const branchesBefore = (await git(checkout, 'branch --list')).stdout;
+  const worktreesBefore = (await git(checkout, 'worktree list --porcelain')).stdout;
+  const realBridge = `${process.execPath} ${cliPath}`;
+
+  const result = await runWrapper(
+    `--repo ${quote(checkout)} --branch main --dry-run --bridge ${quote(realBridge)}`,
+    {
+      cwd: root,
+      env: {
+        BRIDGE_HOME: bridgeHome,
+        PATH: process.env.PATH
+      }
+    }
+  );
+
+  assert.equal(result.success, true, `${result.stdout}\n${result.stderr}`);
+  assert.match(`${result.stdout}\n${result.stderr}`, /dry run/i);
+  assert.match(result.stdout, /Saved summary:|Captured run-id:/);
+
+  const isolated = path.join(bridgeHome, 'schedule', 'repos', 'checkout');
+  await assertDedicatedClone(checkout, isolated);
+  assert.equal((await git(checkout, 'rev-parse --abbrev-ref HEAD')).stdout.trim(), 'main');
+  assert.equal((await git(checkout, 'branch --list')).stdout, branchesBefore);
+  assert.equal((await git(checkout, 'worktree list --porcelain')).stdout, worktreesBefore);
+  assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /already used by worktree/);
 });
 
 test('wrapper copies this run-id summary instead of the newest file on disk', async (t) => {

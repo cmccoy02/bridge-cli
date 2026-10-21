@@ -89,6 +89,7 @@ import {
   createPullRequest,
   findReusableBridgePullRequest,
   makePullRequestScopeKey,
+  PullRequestLookupError,
   updatePullRequest
 } from '../core/pullRequest.js';
 import {
@@ -1893,14 +1894,28 @@ export async function patchCommand({
           .map((delta) => delta.name)
       })
     };
-    const reusablePullRequest = await findReusableBridgePullRequest({
-      cwd: tempDir,
-      repoUrl: originUrl || config.repoUrl,
-      baseBranch,
-      branchPrefix,
-      stagedDiff: stagedDiffResult.stdout || '',
-      scopeKey: scopeMeta.scopeKey
-    });
+    let reusablePullRequest = null;
+
+    try {
+      reusablePullRequest = await findReusableBridgePullRequest({
+        cwd: tempDir,
+        repoUrl: originUrl || config.repoUrl,
+        baseBranch,
+        branchPrefix,
+        stagedDiff: stagedDiffResult.stdout || '',
+        scopeKey: scopeMeta.scopeKey
+      });
+    } catch (lookupError) {
+      if (!(lookupError instanceof PullRequestLookupError)) {
+        throw lookupError;
+      }
+
+      warn(lookupError.message);
+      reusablePullRequest = {
+        reuseAction: 'list_failed',
+        reuseReason: lookupError.message
+      };
+    }
 
     if (reusablePullRequest?.reuseAction === 'reuse_identical') {
       branchName = reusablePullRequest.headRefName;
@@ -1931,7 +1946,10 @@ export async function patchCommand({
       return true;
     }
 
-    if (reusablePullRequest?.reuseReason) {
+    if (
+      reusablePullRequest?.reuseReason &&
+      reusablePullRequest.reuseAction !== 'list_failed'
+    ) {
       info(reusablePullRequest.reuseReason);
     }
 
@@ -2039,6 +2057,12 @@ export async function patchCommand({
             `Failed to refresh pull request body for ${reusablePullRequest.url}`
         };
       }
+    } else if (reusablePullRequest?.reuseAction === 'list_failed') {
+      pullRequest = {
+        status: 'list_failed',
+        url: '',
+        message: reusablePullRequest.reuseReason
+      };
     } else {
       pullRequest = await createPullRequest({
         cwd: tempDir,

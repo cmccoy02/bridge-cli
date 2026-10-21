@@ -9,6 +9,25 @@ import { formatValidationPrLine } from './scriptDiff.js';
 
 const BRIDGE_PR_MARKER_RE = /<!--\s*bridge-meta:([\s\S]*?)-->/;
 const BRIDGE_COMMIT_SUBJECT_PREFIX = 'bridge: update dependencies';
+const PR_LIST_JSON_FIELDS = 'number,url,title,headRefName,baseRefName,body,author';
+const PR_LIST_LIMIT = 30;
+
+export class PullRequestLookupError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'PullRequestLookupError';
+  }
+}
+
+function formatGhOutput(result) {
+  return redactSensitiveText(`${result?.stdout || ''}\n${result?.stderr || ''}`.trim());
+}
+
+function throwPullRequestLookupError(detail) {
+  throw new PullRequestLookupError(
+    `${detail} Refusing to open a new pull request that might duplicate an existing Bridge PR.`
+  );
+}
 
 function shellQuote(value) {
   return `'${String(value ?? '').replace(/'/g, `"'"'`)}'`;
@@ -443,6 +462,42 @@ function isBridgePullRequest(entry, branchPrefix) {
   return title.startsWith('bridge:') || head === prefix || head.startsWith(`${prefix}-`);
 }
 
+async function fetchPullRequestCommits({
+  number,
+  repository,
+  cwd,
+  runCommandFn
+}) {
+  const viewCommand = [
+    'gh pr view',
+    String(number),
+    repository ? `--repo ${shellQuote(repository)}` : '',
+    '--json commits'
+  ]
+    .filter(Boolean)
+    .join(' ');
+  const viewed = await runCommandFn(viewCommand, {
+    cwd,
+    allowFailure: true,
+    quiet: true
+  });
+
+  if (!viewed.success) {
+    throwPullRequestLookupError(
+      `GitHub CLI could not load commits for pull request #${number}: ${formatGhOutput(viewed) || 'unknown error'}.`
+    );
+  }
+
+  try {
+    const parsed = JSON.parse(viewed.stdout || '{}');
+    return Array.isArray(parsed.commits) ? parsed.commits : [];
+  } catch {
+    throwPullRequestLookupError(
+      `GitHub CLI returned unreadable commit metadata for pull request #${number}.`
+    );
+  }
+}
+
 export async function findReusableBridgePullRequest({
   cwd,
   repoUrl,
@@ -462,8 +517,8 @@ export async function findReusableBridgePullRequest({
     'gh pr list',
     repository ? `--repo ${shellQuote(repository)}` : '',
     '--state open',
-    '--limit 50',
-    '--json number,url,title,headRefName,baseRefName,body,author,commits'
+    `--limit ${PR_LIST_LIMIT}`,
+    `--json ${PR_LIST_JSON_FIELDS}`
   ]
     .filter(Boolean)
     .join(' ');
@@ -474,7 +529,9 @@ export async function findReusableBridgePullRequest({
   });
 
   if (!listed.success) {
-    return null;
+    throwPullRequestLookupError(
+      `GitHub CLI could not list open pull requests: ${formatGhOutput(listed) || 'unknown error'}.`
+    );
   }
 
   let pullRequests = [];
@@ -482,10 +539,14 @@ export async function findReusableBridgePullRequest({
   try {
     pullRequests = JSON.parse(listed.stdout || '[]');
   } catch {
-    return null;
+    throwPullRequestLookupError('GitHub CLI returned unreadable pull request list output.');
   }
 
-  const candidates = (Array.isArray(pullRequests) ? pullRequests : [])
+  if (!Array.isArray(pullRequests)) {
+    throwPullRequestLookupError('GitHub CLI returned unreadable pull request list output.');
+  }
+
+  const candidates = pullRequests
     .filter(
       (entry) =>
         isBridgePullRequest(entry, branchPrefix) &&
@@ -502,6 +563,12 @@ export async function findReusableBridgePullRequest({
   const matches = [];
 
   for (const candidate of candidates) {
+    const commits = await fetchPullRequestCommits({
+      number: candidate.number,
+      repository,
+      cwd,
+      runCommandFn
+    });
     const diffCommand = [
       'gh pr diff',
       String(candidate.number),
@@ -524,7 +591,7 @@ export async function findReusableBridgePullRequest({
     );
     const sameFiles = remote.success && localFiles.length > 0 && sameFileSet(localFiles, remoteFiles);
     const expectedAuthors = [candidate.author].filter(Boolean);
-    const foreignCommits = getForeignPullRequestCommits(candidate.commits, { expectedAuthors });
+    const foreignCommits = getForeignPullRequestCommits(commits, { expectedAuthors });
     const decision = decidePullRequestReuse({
       identical,
       localScopeKey: scopeKey,
@@ -534,6 +601,7 @@ export async function findReusableBridgePullRequest({
 
     matches.push({
       ...candidate,
+      commits,
       identical,
       sameFiles,
       remoteMarker,
