@@ -617,28 +617,33 @@ bridge report --latest
 
 ## Daily scheduler prototype
 
-`scripts/bridge-daily.sh` is a lockfile-guarded wrapper: fetch/pull (or clone) a target repo, run `bridge patch` with the after-script suite, copy `bridge-summary.md` to a dated folder. No daemon, no cloud scheduler, no extra npm dependencies. It exits `2` if another run holds the lock, `3` on usage errors, and Bridge's own non-zero status on a failed patch. It never force-pushes a PR; the normal gates still apply.
+`scripts/bridge-daily.sh` is a lockfile-guarded wrapper: fetch/pull (or clone) a target repo, run `bridge patch` with the after-script suite, copy **this run's** `bridge-summary.md` to a dated folder. No daemon, no cloud scheduler, no extra npm dependencies. It exits `2` if another run holds the lock, `3` on usage errors, and Bridge's own non-zero status on a failed patch. It never force-pushes a PR; the normal gates still apply.
 
 The wrapper defaults to `--skip-before-scripts` so an unattended daily run matches the temporary "strip before-scripts" path. Pass `--run-before-scripts` to keep the configured before-script list.
 
-```bash
-# One-shot from this checkout (clones or updates ~/.bridge/schedule/repos/<name>):
-scripts/bridge-daily.sh --repo git@github.com:travelpassgroup/travelpass.com.git --branch main
+Local `--repo` paths never run `git checkout` in the developer's tree. The wrapper creates a detached worktree (or a dedicated clone) under `~/.bridge/schedule/repos/<name>` and leaves the user's current branch alone. An untracked `bridge.config.json` (Bridge's documented default) is ignored by the dirty-tree check; other uncommitted changes still refuse.
 
-# Point at an existing clean checkout (fast-forward only; refuses a dirty tree):
+A fresh URL clone has no config. Pass `--config <path>`, or place one at `~/.bridge/schedule/configs/<repo-name>/bridge.config.json`. Local checkouts copy their own `bridge.config.json` into the isolated worktree.
+
+```bash
+# URL clone — supply a config (typical repos do not commit one):
+scripts/bridge-daily.sh --repo git@github.com:travelpassgroup/travelpass.com.git --branch main \
+  --config /Users/connormccoy/CODE/travelpass.com/bridge.config.json
+
+# Existing checkout (isolated worktree; does not switch your branch):
 scripts/bridge-daily.sh --repo /Users/connormccoy/CODE/travelpass.com --run-before-scripts
 
 # Simulate without commit/push:
-scripts/bridge-daily.sh --repo /path/to/repo --dry-run
+scripts/bridge-daily.sh --repo /path/to/repo --dry-run --config /path/to/bridge.config.json
 ```
 
-Dated copies land in `~/.bridge/schedule/summaries/<repo>/<UTC-timestamp>/`.
+Dated copies land in `~/.bridge/schedule/summaries/<repo>/<UTC-timestamp>/` and include `run-id.txt` for the captured run.
 
 ### macOS launchd (primary)
 
 1. `mkdir -p ~/.bridge/schedule/logs`
 2. Copy `scripts/schedule/com.bridge.daily.plist.example` to `~/Library/LaunchAgents/com.bridge.daily.plist`
-3. Replace `REPLACE_*` values (this repo path, the target git URL, `$HOME`)
+3. Replace `REPLACE_*` values (this repo path, the target git URL, the Bridge config path, `$HOME`)
 4. Load it:
 
 ```bash
@@ -652,10 +657,11 @@ The example fires daily at 07:30 local time. The Mac must be awake. To unload: `
 
 ### Linux cron
 
-See `scripts/schedule/crontab.example`. After `crontab -e`:
+See `scripts/schedule/crontab.example`. Cron's default PATH does not include `node`; the example PATH starts with `REPLACE_NODE_BIN_DIR`. After `crontab -e`:
 
 ```
-30 7 * * * /bin/bash /path/to/bridge-cli/scripts/bridge-daily.sh --repo git@github.com:org/app.git --branch main >> $HOME/.bridge/schedule/logs/daily.log 2>&1
+PATH=REPLACE_NODE_BIN_DIR:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin
+30 7 * * * /bin/bash /path/to/bridge-cli/scripts/bridge-daily.sh --repo git@github.com:org/app.git --branch main --config /path/to/bridge.config.json >> $HOME/.bridge/schedule/logs/daily.log 2>&1
 ```
 
 ## Isolated-workspace gotchas

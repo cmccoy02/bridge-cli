@@ -4,7 +4,7 @@
   macOS launchd example for a once-daily Bridge run.
 
   1. Copy this file to ~/Library/LaunchAgents/com.bridge.daily.plist
-  2. Replace every REPLACE_* value.
+  2. Replace every REPLACE_* value (repo URL, this checkout, config path, $HOME).
   3. launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.bridge.daily.plist
   4. launchctl enable gui/$(id -u)/com.bridge.daily
   5. launchctl kickstart -k gui/$(id -u)/com.bridge.daily   # optional immediate run
@@ -24,6 +24,8 @@
     <string>REPLACE_GIT_URL_OR_CHECKOUT</string>
     <string>--branch</string>
     <string>main</string>
+    <string>--config</string>
+    <string>REPLACE_PATH_TO_BRIDGE_CONFIG</string>
   </array>
   <key>WorkingDirectory</key>
   <string>REPLACE_PATH_TO_BRIDGE_CLI</string>
