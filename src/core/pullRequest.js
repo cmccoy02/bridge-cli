@@ -8,6 +8,7 @@ import { redactSensitiveText } from './redaction.js';
 import { formatValidationPrLine } from './scriptDiff.js';
 
 const BRIDGE_PR_MARKER_RE = /<!--\s*bridge-meta:([\s\S]*?)-->/;
+const BRIDGE_COMMIT_SUBJECT_PREFIX = 'bridge: update dependencies';
 
 function shellQuote(value) {
   return `'${String(value ?? '').replace(/'/g, `"'"'`)}'`;
@@ -155,54 +156,147 @@ export function parseBridgePrMarker(body) {
   }
 }
 
+function normalizeAuthorToken(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function collectCommitAuthors(commit) {
+  const authors = [];
+
+  if (Array.isArray(commit?.authors)) {
+    authors.push(...commit.authors);
+  }
+
+  if (commit?.author && typeof commit.author === 'object') {
+    authors.push(commit.author);
+  }
+
+  if (commit?.authorName || commit?.authorEmail || commit?.authorLogin) {
+    authors.push({
+      name: commit.authorName,
+      email: commit.authorEmail,
+      login: commit.authorLogin
+    });
+  }
+
+  return authors
+    .map((author) => ({
+      name: normalizeAuthorToken(author?.name),
+      email: normalizeAuthorToken(author?.email),
+      login: normalizeAuthorToken(author?.login)
+    }))
+    .filter((author) => author.name || author.email || author.login);
+}
+
+function commitSubject(commit) {
+  return String(commit?.messageHeadline || commit?.subject || commit?.message || '')
+    .trim()
+    .split('\n')[0];
+}
+
+export function isBridgeCommitSubject(subject) {
+  return String(subject || '').trim().startsWith(BRIDGE_COMMIT_SUBJECT_PREFIX);
+}
+
+export function isBridgeAuthor(author, expectedAuthors = []) {
+  const candidates = collectCommitAuthors({ authors: [author] });
+
+  if (candidates.length === 0) {
+    return false;
+  }
+
+  const expected = collectCommitAuthors({ authors: expectedAuthors });
+
+  return candidates.some((candidate) => {
+    if (candidate.name === 'bridge' || candidate.login === 'bridge' || candidate.login === 'bridge-cli') {
+      return true;
+    }
+
+    if (candidate.email.startsWith('bridge@')) {
+      return true;
+    }
+
+    return expected.some(
+      (entry) =>
+        (entry.email && candidate.email && entry.email === candidate.email) ||
+        (entry.login && candidate.login && entry.login === candidate.login) ||
+        (entry.name && candidate.name && entry.name === candidate.name)
+    );
+  });
+}
+
+export function isBridgeAuthoredCommit(commit, { expectedAuthors = [] } = {}) {
+  if (!isBridgeCommitSubject(commitSubject(commit))) {
+    return false;
+  }
+
+  const authors = collectCommitAuthors(commit);
+
+  if (authors.length === 0) {
+    return true;
+  }
+
+  return authors.some((author) => isBridgeAuthor(author, expectedAuthors));
+}
+
+export function getForeignPullRequestCommits(commits = [], { expectedAuthors = [] } = {}) {
+  const list = Array.isArray(commits) ? commits : [];
+  const hasAuthorMetadata = list.some((commit) => collectCommitAuthors(commit).length > 0);
+
+  if (!hasAuthorMetadata) {
+    return list.filter((commit) => !isBridgeCommitSubject(commitSubject(commit)));
+  }
+
+  return list.filter((commit) => !isBridgeAuthoredCommit(commit, { expectedAuthors }));
+}
+
 export function makePullRequestScopeKey({
   configSha256 = '',
   requestedScope = 'all',
-  updateCommands = [],
-  directPackages = []
+  updateCommands = []
 } = {}) {
   const commands = (Array.isArray(updateCommands) ? updateCommands : [])
     .map((command) => String(command || '').trim())
     .filter(Boolean);
-  const packages = [
-    ...new Set(
-      (Array.isArray(directPackages) ? directPackages : [])
-        .map((name) => String(name || '').trim())
-        .filter(Boolean)
-    )
-  ].sort();
 
-  return [
-    String(configSha256 || ''),
-    String(requestedScope || 'all'),
-    commands.join('\n'),
-    packages.join(',')
-  ].join('|');
+  return [String(configSha256 || ''), String(requestedScope || 'all'), commands.join('\n')].join('|');
+}
+
+export function getStablePullRequestIdentity(scopeKey = '') {
+  const parts = String(scopeKey || '').split('|');
+
+  if (parts.length >= 3) {
+    return parts.slice(0, 3).join('|');
+  }
+
+  return String(scopeKey || '');
 }
 
 export function decidePullRequestReuse({
   identical = false,
-  sameFiles = false,
   localScopeKey = '',
-  remoteMarker = null
+  remoteMarker = null,
+  foreignCommits = []
 } = {}) {
   if (identical) {
     return { action: 'reuse_identical', reason: '' };
   }
 
-  if (!sameFiles) {
-    return { action: 'open_new', reason: '' };
-  }
-
-  if (!remoteMarker || !remoteMarker.scopeKey) {
+  if (Array.isArray(foreignCommits) && foreignCommits.length > 0) {
     return {
       action: 'open_new',
       reason:
-        'An open Bridge pull request touches the same files but has no scope marker. Opening a new PR instead of replacing it.'
+        'An open Bridge pull request contains commits Bridge did not author. Opening a new PR instead of replacing it.'
     };
   }
 
-  if (localScopeKey && remoteMarker.scopeKey !== localScopeKey) {
+  const remoteScopeKey = remoteMarker?.scopeKey || '';
+
+  if (
+    localScopeKey &&
+    remoteScopeKey &&
+    getStablePullRequestIdentity(localScopeKey) !== getStablePullRequestIdentity(remoteScopeKey)
+  ) {
     return {
       action: 'open_new',
       reason:
@@ -369,7 +463,7 @@ export async function findReusableBridgePullRequest({
     repository ? `--repo ${shellQuote(repository)}` : '',
     '--state open',
     '--limit 50',
-    '--json number,url,title,headRefName,baseRefName,body'
+    '--json number,url,title,headRefName,baseRefName,body,author,commits'
   ]
     .filter(Boolean)
     .join(' ');
@@ -391,11 +485,13 @@ export async function findReusableBridgePullRequest({
     return null;
   }
 
-  const candidates = (Array.isArray(pullRequests) ? pullRequests : []).filter(
-    (entry) =>
-      isBridgePullRequest(entry, branchPrefix) &&
-      (!baseBranch || !entry.baseRefName || entry.baseRefName === baseBranch)
-  );
+  const candidates = (Array.isArray(pullRequests) ? pullRequests : [])
+    .filter(
+      (entry) =>
+        isBridgePullRequest(entry, branchPrefix) &&
+        (!baseBranch || !entry.baseRefName || entry.baseRefName === baseBranch)
+    )
+    .sort((left, right) => Number(left.number) - Number(right.number));
 
   if (candidates.length === 0) {
     return null;
@@ -419,27 +515,21 @@ export async function findReusableBridgePullRequest({
       quiet: true
     });
 
-    if (!remote.success) {
-      continue;
-    }
-
-    const remoteDiff = remote.stdout || '';
+    const remoteDiff = remote.success ? remote.stdout || '' : '';
     const remoteNormalized = normalizePullRequestDiff(remoteDiff);
     const remoteFiles = filesFromDiff(remoteDiff);
     const remoteMarker = parseBridgePrMarker(candidate.body);
-    const identical =
-      Boolean(localNormalized && remoteNormalized && localNormalized === remoteNormalized);
-    const sameFiles = localFiles.length > 0 && sameFileSet(localFiles, remoteFiles);
-
-    if (!identical && !sameFiles) {
-      continue;
-    }
-
+    const identical = Boolean(
+      remote.success && localNormalized && remoteNormalized && localNormalized === remoteNormalized
+    );
+    const sameFiles = remote.success && localFiles.length > 0 && sameFileSet(localFiles, remoteFiles);
+    const expectedAuthors = [candidate.author].filter(Boolean);
+    const foreignCommits = getForeignPullRequestCommits(candidate.commits, { expectedAuthors });
     const decision = decidePullRequestReuse({
       identical,
-      sameFiles,
       localScopeKey: scopeKey,
-      remoteMarker
+      remoteMarker,
+      foreignCommits
     });
 
     matches.push({
@@ -447,6 +537,7 @@ export async function findReusableBridgePullRequest({
       identical,
       sameFiles,
       remoteMarker,
+      foreignCommits,
       reuseAction: decision.action,
       reuseReason: decision.reason
     });
