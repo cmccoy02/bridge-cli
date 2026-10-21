@@ -102,7 +102,7 @@ Runs the patch engine end-to-end:
 - Capture the pre-update vulnerability and Visualizer baselines
 - Install the committed lockfile baseline, then run `beforeScripts`
 - Update dependencies and install the candidate tree, then run `afterScripts`
-- Diff before vs after: only NEW after-script failures block push/PR, including new error output inside a command that already failed on the baseline. Time-varying noise (`Start at HH:MM:SS`, TAP `duration_ms`, ISO timestamps, pids) is normalized so pre-existing failing vitest/node:test suites do not false-positive
+- Diff before vs after: only NEW after-script failures block push/PR, including new error output inside a command that already failed on the baseline. Time-varying noise (`Start at HH:MM:SS`, TAP `duration_ms`, ISO/epoch timestamps, `(node:PID)` warnings, host:port pairs, heap/size numbers, UUIDs, temp paths) is normalized so pre-existing failing vitest/node:test suites do not false-positive
 - Print a compact after-script table at the end of every run (name, pass/fail, new vs baseline, duration, full log path) and write the same rows to `bridge-report.v1.json` plus `bridge-summary.md`
 - Hide untracked `bridge.config.json` from the isolated workspace so repo lint/format scripts do not fail on Bridge's own config
 - Stage only dependency manifests and lockfiles, never paths under `node_modules/`
@@ -112,7 +112,7 @@ Runs the patch engine end-to-end:
 - Exit before candidate reinstall/after-scripts when the lockfile did not change
 - `--block-on-baseline-failures` stops after the committed baseline, before the update
 - Commit and push only through the protected-branch guard after every gate passes
-- Reuse an open Bridge PR with identical changes. Update it only when the hidden scope marker matches and the branch contains only Bridge commits; a narrower run opens a new PR instead of replacing a broader one
+- Reuse an open Bridge PR with identical changes. Update it only when the hidden scope marker matches and the branch contains only Bridge commits; a narrower run opens a new PR instead of replacing a broader one. If `gh pr list` fails (including GitHub's GraphQL node-limit error), Bridge surfaces the error and refuses to open a silent duplicate
 - Refresh PR bodies through `gh api` (REST) rather than `gh pr edit`, and never print a success check when the body update failed
 - Create a pull request through an existing GitHub CLI session when available
 - Print pull request/compare URLs and final summary, using the reused PR's branch name when one is updated
@@ -452,7 +452,7 @@ The `bridge-report.v1.json` and PR body now include:
 - Package from→to table, bundle-size delta, and the local report path
 - Phase timing information
 
-If an open Bridge PR already has an identical diff, Bridge reuses it instead of opening a duplicate. If the same files changed with a new patch, Bridge updates that PR's branch.
+If an open Bridge PR already has an identical diff, Bridge reuses it instead of opening a duplicate. If the same files changed with a new patch, Bridge updates that PR's branch. Open-PR lookup lists metadata only (no commit payloads) and loads commits per candidate; a GitHub CLI list failure is surfaced and Bridge refuses to open a silent duplicate.
 
 ### Pull request creation
 
@@ -621,16 +621,16 @@ bridge report --latest
 
 The wrapper defaults to `--skip-before-scripts` so an unattended daily run matches the temporary "strip before-scripts" path. Pass `--run-before-scripts` to keep the configured before-script list.
 
-Local `--repo` paths never run `git checkout` in the developer's tree. The wrapper creates a detached worktree (or a dedicated clone) under `~/.bridge/schedule/repos/<name>` and leaves the user's current branch alone. An untracked `bridge.config.json` (Bridge's documented default) is ignored by the dirty-tree check; other uncommitted changes still refuse.
+Local `--repo` paths never run `git checkout`, `git worktree`, or branch creation in the developer's tree. The wrapper always uses a dedicated plain clone under `~/.bridge/schedule/repos/<name>` and leaves the user's current branch alone. An untracked `bridge.config.json` (Bridge's documented default) is ignored by the dirty-tree check; other uncommitted changes still refuse.
 
-A fresh URL clone has no config. Pass `--config <path>`, or place one at `~/.bridge/schedule/configs/<repo-name>/bridge.config.json`. Local checkouts copy their own `bridge.config.json` into the isolated worktree.
+A fresh URL clone has no config. Pass `--config <path>`, or place one at `~/.bridge/schedule/configs/<repo-name>/bridge.config.json`. Local checkouts copy their own `bridge.config.json` into the isolated clone.
 
 ```bash
 # URL clone — supply a config (typical repos do not commit one):
 scripts/bridge-daily.sh --repo git@github.com:travelpassgroup/travelpass.com.git --branch main \
   --config /Users/connormccoy/CODE/travelpass.com/bridge.config.json
 
-# Existing checkout (isolated worktree; does not switch your branch):
+# Existing checkout (dedicated clone; does not switch your branch):
 scripts/bridge-daily.sh --repo /Users/connormccoy/CODE/travelpass.com --run-before-scripts
 
 # Simulate without commit/push:

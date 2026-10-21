@@ -12,8 +12,17 @@ import {
   isBridgeAuthoredCommit,
   makePullRequestScopeKey,
   parseBridgePrMarker,
+  PullRequestLookupError,
   updatePullRequest
 } from '../src/core/pullRequest.js';
+
+function prViewCommits(commits = []) {
+  return {
+    success: true,
+    stdout: JSON.stringify({ commits }),
+    stderr: ''
+  };
+}
 
 test('GitHub repository parsing supports HTTPS and SSH origin URLs', () => {
   assert.equal(
@@ -203,6 +212,7 @@ test('pull request creation is unavailable when gh is not installed', async () =
 
 test('findReusableBridgePullRequest reuses an identical open Bridge PR', async () => {
   const stagedDiff = 'diff --git a/package-lock.json b/package-lock.json\nindex 111..222 100644\n--- a/package-lock.json\n+++ b/package-lock.json\n@@ -1 +1 @@\n-old\n+new\n';
+  const commands = [];
   const result = await findReusableBridgePullRequest({
     cwd: '/tmp/repo',
     repoUrl: 'https://github.com/example/project.git',
@@ -211,6 +221,7 @@ test('findReusableBridgePullRequest reuses an identical open Bridge PR', async (
     stagedDiff,
     commandExistsFn: async () => true,
     runCommandFn: async (command) => {
+      commands.push(command);
       if (command.startsWith('gh pr list')) {
         return {
           success: true,
@@ -225,6 +236,9 @@ test('findReusableBridgePullRequest reuses an identical open Bridge PR', async (
           ])
         };
       }
+      if (command.startsWith('gh pr view')) {
+        return prViewCommits();
+      }
       if (command.startsWith('gh pr diff')) {
         return { success: true, stdout: stagedDiff, stderr: '' };
       }
@@ -235,6 +249,11 @@ test('findReusableBridgePullRequest reuses an identical open Bridge PR', async (
   assert.equal(result.identical, true);
   assert.equal(result.reuseAction, 'reuse_identical');
   assert.equal(result.url, 'https://github.com/example/project/pull/5');
+  assert.match(commands[0], /gh pr list/);
+  assert.match(commands[0], /--limit 30/);
+  assert.match(commands[0], /--json number,url,title,headRefName,baseRefName,body,author(?:\s|$)/);
+  assert.doesNotMatch(commands[0], /commits/);
+  assert.ok(commands.some((command) => command.startsWith('gh pr view') && /--json commits/.test(command)));
 });
 
 test('findReusableBridgePullRequest updates a legacy Bridge PR with no reuse marker', async () => {
@@ -263,6 +282,9 @@ test('findReusableBridgePullRequest updates a legacy Bridge PR with no reuse mar
             }
           ])
         };
+      }
+      if (command.startsWith('gh pr view')) {
+        return prViewCommits();
       }
       if (command.startsWith('gh pr diff')) {
         return { success: true, stdout: remoteDiff, stderr: '' };
@@ -314,6 +336,9 @@ test('findReusableBridgePullRequest updates only when the scope marker matches',
             }
           ])
         };
+      }
+      if (command.startsWith('gh pr view')) {
+        return prViewCommits();
       }
       if (command.startsWith('gh pr diff')) {
         return { success: true, stdout: remoteDiff, stderr: '' };
@@ -450,16 +475,18 @@ test('findReusableBridgePullRequest updates when the package set and files chang
                 baseBranch: 'main',
                 scopeMeta: { v: 1, scopeKey: remoteScopeKey }
               }),
-              author: { login: 'bridge-cli', name: 'Bridge' },
-              commits: [
-                {
-                  messageHeadline: 'bridge: update dependencies (non-breaking)',
-                  authors: [{ name: 'Bridge', email: 'bridge@example.test', login: 'bridge-cli' }]
-                }
-              ]
+              author: { login: 'bridge-cli', name: 'Bridge' }
             }
           ])
         };
+      }
+      if (command.startsWith('gh pr view')) {
+        return prViewCommits([
+          {
+            messageHeadline: 'bridge: update dependencies (non-breaking)',
+            authors: [{ name: 'Bridge', email: 'bridge@example.test', login: 'bridge-cli' }]
+          }
+        ]);
       }
       if (command.startsWith('gh pr diff')) {
         return { success: true, stdout: remoteDiff, stderr: '' };
@@ -523,6 +550,9 @@ test('findReusableBridgePullRequest prefers the oldest matching open Bridge PR',
           ])
         };
       }
+      if (command.startsWith('gh pr view')) {
+        return prViewCommits();
+      }
       if (command.startsWith('gh pr diff')) {
         return { success: true, stdout: remoteDiff, stderr: '' };
       }
@@ -567,20 +597,22 @@ test('findReusableBridgePullRequest refuses to update over reviewer-authored com
                 baseBranch: 'main',
                 scopeMeta: { v: 1, scopeKey }
               }),
-              author: { login: 'bridge-cli', name: 'Bridge' },
-              commits: [
-                {
-                  messageHeadline: 'bridge: update dependencies (non-breaking)',
-                  authors: [{ name: 'Bridge', email: 'bridge@example.test', login: 'bridge-cli' }]
-                },
-                {
-                  messageHeadline: 'bridge: update dependencies (non-breaking)',
-                  authors: [{ name: 'Reviewer', email: 'reviewer@example.test', login: 'reviewer' }]
-                }
-              ]
+              author: { login: 'bridge-cli', name: 'Bridge' }
             }
           ])
         };
+      }
+      if (command.startsWith('gh pr view')) {
+        return prViewCommits([
+          {
+            messageHeadline: 'bridge: update dependencies (non-breaking)',
+            authors: [{ name: 'Bridge', email: 'bridge@example.test', login: 'bridge-cli' }]
+          },
+          {
+            messageHeadline: 'bridge: update dependencies (non-breaking)',
+            authors: [{ name: 'Reviewer', email: 'reviewer@example.test', login: 'reviewer' }]
+          }
+        ]);
       }
       if (command.startsWith('gh pr diff')) {
         return { success: true, stdout: remoteDiff, stderr: '' };
@@ -591,6 +623,67 @@ test('findReusableBridgePullRequest refuses to update over reviewer-authored com
 
   assert.equal(result.reuseAction, 'open_new');
   assert.match(result.reuseReason, /did not author/);
+});
+
+test('findReusableBridgePullRequest surfaces a gh list error instead of opening a duplicate', async () => {
+  await assert.rejects(
+    () =>
+      findReusableBridgePullRequest({
+        cwd: '/tmp/repo',
+        repoUrl: 'https://github.com/example/project.git',
+        baseBranch: 'main',
+        stagedDiff: 'diff --git a/package-lock.json b/package-lock.json\n',
+        commandExistsFn: async () => true,
+        runCommandFn: async (command) => {
+          if (command.startsWith('gh pr list')) {
+            return {
+              success: false,
+              stdout: '',
+              stderr: 'gh: To get started with GitHub CLI, please run:  gh auth login'
+            };
+          }
+          return { success: false, stdout: '', stderr: 'unexpected' };
+        }
+      }),
+    (error) => {
+      assert.equal(error instanceof PullRequestLookupError, true);
+      assert.match(error.message, /could not list open pull requests/i);
+      assert.match(error.message, /gh auth login/);
+      assert.match(error.message, /duplicate/);
+      return true;
+    }
+  );
+});
+
+test('findReusableBridgePullRequest surfaces the GraphQL node-limit list error', async () => {
+  await assert.rejects(
+    () =>
+      findReusableBridgePullRequest({
+        cwd: '/tmp/repo',
+        repoUrl: 'https://github.com/example/project.git',
+        baseBranch: 'main',
+        stagedDiff: 'diff --git a/package-lock.json b/package-lock.json\n',
+        commandExistsFn: async () => true,
+        runCommandFn: async (command) => {
+          if (command.startsWith('gh pr list')) {
+            return {
+              success: false,
+              stdout: '',
+              stderr:
+                'GraphQL: Your query requested 512384 nodes, which exceeds the maximum node limit of 500000'
+            };
+          }
+          return { success: false, stdout: '', stderr: 'unexpected' };
+        }
+      }),
+    (error) => {
+      assert.equal(error instanceof PullRequestLookupError, true);
+      assert.match(error.message, /could not list open pull requests/i);
+      assert.match(error.message, /500000/);
+      assert.match(error.message, /duplicate/);
+      return true;
+    }
+  );
 });
 
 test('updatePullRequest patches the PR body through gh api', async () => {

@@ -21,7 +21,8 @@ import {
   combineCommandStreams,
   extractFailingExcerpt,
   failureOutputChanged,
-  newErrorLines
+  newErrorLines,
+  normalizeFailureText
 } from '../src/core/commandOutput.js';
 import {
   describeScriptLifecycleOrder,
@@ -665,6 +666,67 @@ test('scriptDiff: ISO timestamps and pids in an error are not a new failure', ()
 
   assert.equal(comparison.hasNewFailures, false);
   assert.equal(comparison.hasBaselineNoise, true);
+});
+
+test('scriptDiff: node pid warnings, host ports, heap sizes, UUIDs, and epochs are noise', () => {
+  const before = [
+    '(node:12345) Warning: The `util.isArray` API is deprecated',
+    'listen EADDRINUSE: address already in use 127.0.0.1:59329',
+    'retrying localhost:4173 and [::1]:4173',
+    'heapUsed: 18432000 rss: 42100000',
+    'FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory',
+    'Scavenge 12.4 (14.8) -> 13.1 (15.2) MB',
+    'request-id 550e8400-e29b-41d4-a716-446655440000',
+    'started at 1750000000000 (epoch 1750000000)',
+    'writing /var/folders/zz/abcd/T/tmp.abc123XYZ/out.log'
+  ].join('\n');
+  const after = [
+    '(node:98765) Warning: The `util.isArray` API is deprecated',
+    'listen EADDRINUSE: address already in use 127.0.0.1:48111',
+    'retrying localhost:51204 and [::1]:51204',
+    'heapUsed: 22100480 rss: 51200480',
+    'FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory',
+    'Scavenge 18.9 (21.0) -> 19.4 (22.1) MB',
+    'request-id 123e4567-e89b-12d3-a456-426614174000',
+    'started at 1760000000123 (epoch 1760000000)',
+    'writing /var/folders/zz/efgh/T/tmp.Q9z8y7x6WV/out.log'
+  ].join('\n');
+
+  assert.match(normalizeFailureText(before), /\(node:<pid>\) Warning/);
+  assert.match(normalizeFailureText(before), /127\.0\.0\.1:<port>/);
+  assert.match(normalizeFailureText(before), /localhost:<port>/);
+  assert.match(normalizeFailureText(before), /<uuid>/);
+  assert.match(normalizeFailureText(before), /<timestamp>/);
+  assert.doesNotMatch(normalizeFailureText(after), /98765|48111|51204|22100480|1760000000123/);
+
+  const comparison = compareScriptResults(
+    captureScriptResults([{ command: 'npm test', success: false, code: 1, stderr: before }]),
+    captureScriptResults([{ command: 'npm test', success: false, code: 1, stderr: after }])
+  );
+
+  assert.equal(comparison.hasNewFailures, false);
+  assert.equal(comparison.hasBaselineNoise, true);
+});
+
+test('scriptDiff: a genuine new error still blocks after pid/port/uuid noise is normalized', () => {
+  const before = [
+    '(node:12345) Warning: The `util.isArray` API is deprecated',
+    'listen EADDRINUSE: address already in use 127.0.0.1:59329'
+  ].join('\n');
+  const after = [
+    '(node:98765) Warning: The `util.isArray` API is deprecated',
+    'listen EADDRINUSE: address already in use 127.0.0.1:48111',
+    'NEW_ERROR: TypeError: cannot read property of undefined'
+  ].join('\n');
+
+  const comparison = compareScriptResults(
+    captureScriptResults([{ command: 'npm test', success: false, code: 1, stderr: before }]),
+    captureScriptResults([{ command: 'npm test', success: false, code: 1, stderr: after }])
+  );
+
+  assert.equal(comparison.hasNewFailures, true);
+  assert.equal(comparison.newFailures[0].outputChanged, true);
+  assert.ok(comparison.newFailures[0].addedErrorLines.some((line) => /NEW_ERROR/.test(line)));
 });
 
 test('scriptDiff: a genuine new error still blocks inside noisy failing output', () => {

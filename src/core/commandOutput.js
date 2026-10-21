@@ -7,15 +7,29 @@
 
 const ANSI_RE = /\u001b\[[0-9;]*m/g;
 const TEMP_WORKSPACE_RE = /\/(?:tmp|var\/folders)\/[^\s:'"]*bridge-[^\s:'"]+/gi;
-const ABS_TMP_RE = /(?:\/(?:tmp|private\/tmp|var\/folders)\/[^\s:'"]+)/g;
+const ABS_TMP_RE =
+  /(?:\/(?:tmp|private\/tmp|private\/var\/folders|var\/folders)\/[^\s:'"]+)/g;
+const WIN_TEMP_RE =
+  /(?:[A-Za-z]:\\(?:Users\\[^\\]+\\AppData\\Local\\Temp|Windows\\Temp)\\[^\s:'"]+)/gi;
+const TEMP_NAME_RE = /\b(?:tmp|temp)[-.][A-Za-z0-9_-]{4,}\b/gi;
 const DURATION_RE = /\b\d+(?:\.\d+)?\s*(?:ms|s|m|sec|secs|seconds|minutes)\b/gi;
 const DURATION_MS_KEY_RE = /\bduration_ms:\s*\d+(?:\.\d+)?/gi;
 const CLOCK_TIME_RE = /\b\d{1,2}:\d{2}:\d{2}(?:\.\d+)?\b/g;
 const ISO_TIMESTAMP_RE =
   /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?/g;
+const EPOCH_MS_RE = /\b1[6-9]\d{11}\b/g;
+const EPOCH_S_RE = /\b1[6-9]\d{8}\b/g;
+const UUID_RE =
+  /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi;
 const PID_RE = /\b(?:pid|PID|process(?:\s+id)?)\s*[:#]?\s*\d+\b/g;
 const PAREN_PID_RE = /\(pid\s+\d+\)/gi;
+const NODE_PID_RE = /\(node:\d+\)/g;
 const PORT_RE = /\bport\s+\d{2,5}\b/gi;
+const HOST_PORT_RE =
+  /(?:\b(?:(?:\d{1,3}\.){3}\d{1,3}|localhost)|\[::1\]):(\d{2,5})\b/gi;
+const SIZE_RE = /\b\d+(?:\.\d+)?\s*(?:[KMGT]i?B|bytes)\b/gi;
+const HEAP_KEY_RE = /\b(?:heapUsed|heapTotal|heap|rss|external)\s*[:=]\s*\d+(?:\.\d+)?/gi;
+const V8_HEAP_TUPLE_RE = /\b\d+(?:\.\d+)?\s*\(\d+(?:\.\d+)?\)/g;
 
 export function combineCommandStreams(stdout, stderr) {
   const out = String(stdout || '');
@@ -36,10 +50,20 @@ export function normalizeFailureText(text) {
   return stripAnsi(text)
     .replace(TEMP_WORKSPACE_RE, '<workspace>')
     .replace(ABS_TMP_RE, '<tmp>')
+    .replace(WIN_TEMP_RE, '<tmp>')
+    .replace(TEMP_NAME_RE, '<tmp>')
     .replace(ISO_TIMESTAMP_RE, '<timestamp>')
+    .replace(EPOCH_MS_RE, '<timestamp>')
+    .replace(EPOCH_S_RE, '<timestamp>')
+    .replace(UUID_RE, '<uuid>')
+    .replace(NODE_PID_RE, '(node:<pid>)')
     .replace(PAREN_PID_RE, '(pid <pid>)')
     .replace(PID_RE, 'pid <pid>')
+    .replace(HOST_PORT_RE, (match, port) => match.slice(0, -String(port).length) + '<port>')
     .replace(PORT_RE, 'port <port>')
+    .replace(HEAP_KEY_RE, (match) => match.replace(/\d+(?:\.\d+)?$/, '<size>'))
+    .replace(SIZE_RE, '<size>')
+    .replace(V8_HEAP_TUPLE_RE, '<size>')
     .replace(DURATION_MS_KEY_RE, 'duration_ms: <time>')
     .replace(CLOCK_TIME_RE, '<time>')
     .replace(DURATION_RE, '<time>')
