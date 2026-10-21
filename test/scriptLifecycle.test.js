@@ -144,7 +144,32 @@ async function writePatchFixture(
   await git(repoDir, `push origin ${defaultBranch}`);
 }
 
+async function writeFakeGh(binDir, { listExitCode = 0, listStderr = '' } = {}) {
+  await fs.mkdir(binDir, { recursive: true });
+  const script =
+    listExitCode === 0
+      ? `#!/usr/bin/env bash
+if [[ "$1" == "pr" && "$2" == "list" ]]; then
+  echo '[]'
+  exit 0
+fi
+exit 1
+`
+      : `#!/usr/bin/env bash
+if [[ "$1" == "pr" && "$2" == "list" ]]; then
+  echo ${quote(listStderr)} >&2
+  exit ${listExitCode}
+fi
+exit 0
+`;
+  await fs.writeFile(path.join(binDir, 'gh'), script, { mode: 0o755 });
+  return binDir;
+}
+
 async function runPatch(repoDir, bridgeHome, extraArgs = '') {
+  const binDir = path.join(bridgeHome, 'bin-no-pr');
+  await writeFakeGh(binDir, { listExitCode: 0 });
+
   return runCommand(
     `${quote(process.execPath)} ${quote(cliPath)} patch${extraArgs ? ` ${extraArgs}` : ''}`,
     {
@@ -153,7 +178,8 @@ async function runPatch(repoDir, bridgeHome, extraArgs = '') {
       allowFailure: true,
       env: {
         ...gitEnv,
-        BRIDGE_HOME: bridgeHome
+        BRIDGE_HOME: bridgeHome,
+        PATH: `${binDir}:${process.env.PATH}`
       }
     }
   );
@@ -390,6 +416,44 @@ test('baseline install happens before script measurement so node_modules exists'
   assert.ok(order.baselineInstallIndex !== -1);
   assert.ok(order.baselineInstallIndex < order.beforeScriptsIndex);
   assert.ok(order.beforeScriptsRunOnBaseline);
+});
+
+test('patch does not push when listing open pull requests fails', async (t) => {
+  const { repoDir, defaultBranch } = await createRepoWithOrigin(t);
+  const bridgeHome = await makeTempDir(t);
+  const binDir = path.join(bridgeHome, 'bin');
+  await writeFakeGh(binDir, {
+    listExitCode: 1,
+    listStderr:
+      'GraphQL: Your query requested 512384 nodes, which exceeds the maximum node limit of 500000'
+  });
+
+  await writePatchFixture(repoDir, {
+    defaultBranch,
+    beforeScripts: ['node -e "process.exit(0)"'],
+    afterScripts: ['node -e "process.exit(0)"'],
+    extraConfig: { pullRequest: { enabled: true } }
+  });
+
+  const result = await runCommand(`${quote(process.execPath)} ${quote(cliPath)} patch`, {
+    cwd: repoDir,
+    quiet: true,
+    allowFailure: true,
+    env: {
+      ...gitEnv,
+      BRIDGE_HOME: bridgeHome,
+      PATH: `${binDir}:${process.env.PATH}`
+    }
+  });
+  const output = `${result.stdout}\n${result.stderr}`;
+
+  assert.equal(result.success, false, output);
+  assert.notEqual(result.code, 0);
+  assert.match(output, /Stopped without pushing/);
+  assert.match(output, /could not list open pull requests/i);
+  assert.match(output, /500000/);
+  assert.doesNotMatch(output, /Candidate branch pushed/);
+  assert.equal(await listRemoteBridgeBranches(repoDir), '');
 });
 
 test('blockOnBaselineFailures stops after the baseline and before the update', async (t) => {

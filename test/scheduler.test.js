@@ -436,6 +436,45 @@ test('wrapper copies this run-id summary instead of the newest file on disk', as
   assert.match(result.stdout, new RegExp(`Captured run-id: ${saved.runId}`));
 });
 
+test('wrapper re-copies the checkout config instead of a leftover --config copy', async (t) => {
+  const { root, checkout } = await createLocalCheckout(t);
+  const bridgeHome = path.join(root, 'bridge-home');
+  const binDir = path.join(root, 'bin');
+  await fs.mkdir(binDir, { recursive: true });
+  const fakeBridge = await writeFakeBridge(binDir, { exitCode: 0, requireConfig: true });
+  const staleConfig = path.join(root, 'stale.config.json');
+  await fs.writeFile(staleConfig, '{"name":"stale-flag"}\n', 'utf8');
+  await fs.writeFile(path.join(checkout, 'bridge.config.json'), '{"name":"first-checkout"}\n', 'utf8');
+
+  const first = await runWrapper(
+    `--repo ${quote(checkout)} --branch main --config ${quote(staleConfig)}`,
+    {
+      cwd: root,
+      env: wrapperEnv(bridgeHome, binDir, fakeBridge)
+    }
+  );
+
+  assert.equal(first.success, true, `${first.stdout}\n${first.stderr}`);
+  assert.match(first.stdout, /Installed config:/);
+  assert.match(first.stdout, /Using config: .*stale\.config\.json \(sha256:[0-9a-f]{64}\)/);
+
+  await fs.writeFile(path.join(checkout, 'bridge.config.json'), '{"name":"current-checkout"}\n', 'utf8');
+
+  const second = await runWrapper(`--repo ${quote(checkout)} --branch main`, {
+    cwd: root,
+    env: wrapperEnv(bridgeHome, binDir, fakeBridge)
+  });
+
+  assert.equal(second.success, true, `${second.stdout}\n${second.stderr}`);
+  assert.match(second.stdout, /Using config: .*bridge\.config\.json \(sha256:[0-9a-f]{64}\)/);
+  const isolated = await fs.readFile(
+    path.join(bridgeHome, 'schedule', 'repos', 'checkout', 'bridge.config.json'),
+    'utf8'
+  );
+  assert.match(isolated, /current-checkout/);
+  assert.doesNotMatch(isolated, /stale-flag/);
+});
+
 test('wrapper copies --config into a fresh URL clone', async (t) => {
   const { root, originDir } = await createOriginRepo(t);
   const bridgeHome = path.join(root, 'bridge-home');
@@ -455,6 +494,7 @@ test('wrapper copies --config into a fresh URL clone', async (t) => {
 
   assert.equal(result.success, true, `${result.stdout}\n${result.stderr}`);
   assert.match(result.stdout, /Installed config:/);
+  assert.match(result.stdout, /Using config: .*provided\.config\.json \(sha256:[0-9a-f]{64}\)/);
   const repoName = path.basename(originDir).replace(/\.git$/, '');
   const installed = await fs.readFile(
     path.join(bridgeHome, 'schedule', 'repos', repoName, 'bridge.config.json'),

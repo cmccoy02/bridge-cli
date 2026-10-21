@@ -85,9 +85,11 @@ import {
   restoreNpmLocalPackages
 } from '../core/localPackages.js';
 import {
+  buildBridgeCommitMessage,
   buildPullRequestBody,
   createPullRequest,
   findReusableBridgePullRequest,
+  formatDuplicatePullRequestNotice,
   makePullRequestScopeKey,
   PullRequestLookupError,
   updatePullRequest
@@ -1910,11 +1912,19 @@ export async function patchCommand({
         throw lookupError;
       }
 
-      warn(lookupError.message);
-      reusablePullRequest = {
-        reuseAction: 'list_failed',
-        reuseReason: lookupError.message
-      };
+      throw new PatchPolicyError(
+        `Stopped without pushing. ${lookupError.message}`,
+        null,
+        { gateType: 'pr_lookup_failed' }
+      );
+    }
+
+    const duplicateNotice = formatDuplicatePullRequestNotice(
+      reusablePullRequest?.duplicatePullRequests
+    );
+
+    if (duplicateNotice) {
+      warn(duplicateNotice);
     }
 
     if (reusablePullRequest?.reuseAction === 'reuse_identical') {
@@ -1946,10 +1956,7 @@ export async function patchCommand({
       return true;
     }
 
-    if (
-      reusablePullRequest?.reuseReason &&
-      reusablePullRequest.reuseAction !== 'list_failed'
-    ) {
+    if (reusablePullRequest?.reuseReason) {
       info(reusablePullRequest.reuseReason);
     }
 
@@ -1997,7 +2004,7 @@ export async function patchCommand({
           defaultBranch: baseBranch,
           protectedBranches: config.protectedBranches
         });
-        await commitChanges(tempDir, 'bridge: update dependencies (non-breaking)');
+        await commitChanges(tempDir, buildBridgeCommitMessage());
         headSha = await getCurrentHeadSha(tempDir);
         scopeMeta.headSha = headSha;
 
@@ -2057,12 +2064,6 @@ export async function patchCommand({
             `Failed to refresh pull request body for ${reusablePullRequest.url}`
         };
       }
-    } else if (reusablePullRequest?.reuseAction === 'list_failed') {
-      pullRequest = {
-        status: 'list_failed',
-        url: '',
-        message: reusablePullRequest.reuseReason
-      };
     } else {
       pullRequest = await createPullRequest({
         cwd: tempDir,

@@ -9,8 +9,15 @@ import { formatValidationPrLine } from './scriptDiff.js';
 
 const BRIDGE_PR_MARKER_RE = /<!--\s*bridge-meta:([\s\S]*?)-->/;
 const BRIDGE_COMMIT_SUBJECT_PREFIX = 'bridge: update dependencies';
+export const BRIDGE_COMMIT_SUBJECT = 'bridge: update dependencies (non-breaking)';
+export const BRIDGE_COMMIT_TRAILER = 'Bridge-Commit: true';
+const BRIDGE_COMMIT_TRAILER_RE = /(?:^|\n)\s*Bridge-Commit:\s*true\s*(?:\n|$)/i;
 const PR_LIST_JSON_FIELDS = 'number,url,title,headRefName,baseRefName,body,author';
 const PR_LIST_LIMIT = 30;
+
+export function buildBridgeCommitMessage(subject = BRIDGE_COMMIT_SUBJECT) {
+  return `${String(subject || BRIDGE_COMMIT_SUBJECT).trim()}\n\n${BRIDGE_COMMIT_TRAILER}\n`;
+}
 
 export class PullRequestLookupError extends Error {
   constructor(message) {
@@ -217,14 +224,26 @@ export function isBridgeCommitSubject(subject) {
   return String(subject || '').trim().startsWith(BRIDGE_COMMIT_SUBJECT_PREFIX);
 }
 
+export function hasBridgeCommitMarker(commit) {
+  const trailer = String(commit?.bridgeTrailer || '').trim().toLowerCase();
+
+  if (trailer === 'true' || trailer === BRIDGE_COMMIT_TRAILER.toLowerCase()) {
+    return true;
+  }
+
+  const body = String(
+    commit?.messageBody || commit?.body || commit?.message || commit?.messageHeadline || ''
+  );
+
+  return BRIDGE_COMMIT_TRAILER_RE.test(body);
+}
+
 export function isBridgeAuthor(author, expectedAuthors = []) {
   const candidates = collectCommitAuthors({ authors: [author] });
 
   if (candidates.length === 0) {
     return false;
   }
-
-  const expected = collectCommitAuthors({ authors: expectedAuthors });
 
   return candidates.some((candidate) => {
     if (candidate.name === 'bridge' || candidate.login === 'bridge' || candidate.login === 'bridge-cli') {
@@ -235,16 +254,18 @@ export function isBridgeAuthor(author, expectedAuthors = []) {
       return true;
     }
 
-    return expected.some(
-      (entry) =>
-        (entry.email && candidate.email && entry.email === candidate.email) ||
-        (entry.login && candidate.login && entry.login === candidate.login) ||
-        (entry.name && candidate.name && entry.name === candidate.name)
-    );
+    // Matching the PR author (or any other human) is not enough. A reviewer
+    // or PR author can reuse Bridge's subject without being Bridge itself.
+    void expectedAuthors;
+    return false;
   });
 }
 
 export function isBridgeAuthoredCommit(commit, { expectedAuthors = [] } = {}) {
+  if (hasBridgeCommitMarker(commit)) {
+    return true;
+  }
+
   if (!isBridgeCommitSubject(commitSubject(commit))) {
     return false;
   }
@@ -324,6 +345,26 @@ export function decidePullRequestReuse({
   }
 
   return { action: 'update', reason: '' };
+}
+
+export function formatDuplicatePullRequestNotice(duplicates = []) {
+  const list = Array.isArray(duplicates) ? duplicates.filter((entry) => entry?.number) : [];
+
+  if (list.length === 0) {
+    return '';
+  }
+
+  const older = list.filter((entry) => entry.older === true);
+  const flagged = older.length > 0 ? older : list;
+  const labeled = flagged
+    .map((entry) => (entry.url ? `#${entry.number} (${entry.url})` : `#${entry.number}`))
+    .join(', ');
+
+  if (older.length > 0) {
+    return `Older duplicate matching Bridge PR(s): ${labeled}`;
+  }
+
+  return `Other matching Bridge PR(s): ${labeled}`;
 }
 
 export function buildPullRequestBody({
@@ -611,12 +652,32 @@ export async function findReusableBridgePullRequest({
     });
   }
 
-  return (
+  const selected =
     matches.find((entry) => entry.reuseAction === 'reuse_identical') ||
     matches.find((entry) => entry.reuseAction === 'update') ||
     matches[0] ||
-    null
-  );
+    null;
+
+  if (!selected) {
+    return null;
+  }
+
+  const selectedNumber = Number(selected.number);
+  const duplicatePullRequests = matches
+    .filter((entry) => Number(entry.number) !== selectedNumber)
+    .filter((entry) => entry.reuseAction === 'reuse_identical' || entry.reuseAction === 'update')
+    .map((entry) => ({
+      number: entry.number,
+      url: entry.url,
+      headRefName: entry.headRefName,
+      reuseAction: entry.reuseAction,
+      older: Number(entry.number) < selectedNumber
+    }));
+
+  return {
+    ...selected,
+    duplicatePullRequests
+  };
 }
 
 export async function updatePullRequest({
