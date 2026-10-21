@@ -112,7 +112,7 @@ Runs the patch engine end-to-end:
 - Exit before candidate reinstall/after-scripts when the lockfile did not change
 - `--block-on-baseline-failures` stops after the committed baseline, before the update
 - Commit and push only through the protected-branch guard after every gate passes
-- Reuse an open Bridge PR with identical changes. Update it only when the hidden scope marker matches and the branch contains only Bridge commits; a narrower run opens a new PR instead of replacing a broader one. If `gh pr list` fails (including GitHub's GraphQL node-limit error), Bridge surfaces the error and refuses to open a silent duplicate
+- Reuse an open Bridge PR with identical changes. Update it only when the hidden scope marker matches and the branch contains only Bridge commits (a `Bridge-Commit: true` trailer, or Bridge's own author identity — not merely the PR author's name on Bridge's subject). A narrower run opens a new PR instead of replacing a broader one. Older duplicate matching PRs are flagged in the output. If `gh pr list` fails (including GitHub's GraphQL node-limit error), Bridge surfaces the error, does not push the candidate branch, and exits non-zero so it cannot open a silent duplicate
 - Refresh PR bodies through `gh api` (REST) rather than `gh pr edit`, and never print a success check when the body update failed
 - Create a pull request through an existing GitHub CLI session when available
 - Print pull request/compare URLs and final summary, using the reused PR's branch name when one is updated
@@ -315,7 +315,7 @@ Required fields:
 Optional fields:
 - `name`
 - `beforeScripts`
-- `afterScripts`
+- `afterScripts` (see [docs/after-scripts.md](docs/after-scripts.md) for the recommended lint / test / build / typecheck / format-check suite)
 - `skipBeforeScripts` (defaults to `false`; when `true`, configured `beforeScripts` do not run and Bridge captures the baseline by running `afterScripts` on the committed lockfile tree. CLI: `--skip-before-scripts` / `--run-before-scripts`)
 - `auditCommand` (npm defaults to `npm audit --package-lock-only --json`; pnpm to `pnpm audit --json`; yarn to `yarn audit --json`)
 - `blockOnNewVulnerabilities` (defaults to `true`)
@@ -623,7 +623,9 @@ The wrapper defaults to `--skip-before-scripts` so an unattended daily run match
 
 Local `--repo` paths never run `git checkout`, `git worktree`, or branch creation in the developer's tree. The wrapper always uses a dedicated plain clone under `~/.bridge/schedule/repos/<name>` and leaves the user's current branch alone. An untracked `bridge.config.json` (Bridge's documented default) is ignored by the dirty-tree check; other uncommitted changes still refuse.
 
-A fresh URL clone has no config. Pass `--config <path>`, or place one at `~/.bridge/schedule/configs/<repo-name>/bridge.config.json`. Local checkouts copy their own `bridge.config.json` into the isolated clone.
+Config is resolved fresh on every run and the chosen path plus sha256 are logged. `--config` wins when given. Otherwise the wrapper re-copies the developer's current checkout `bridge.config.json`, then `~/.bridge/schedule/configs/<repo-name>/`. A leftover copy in `~/.bridge/schedule/repos/<name>` is never preferred over those sources.
+
+A fresh URL clone has no config. Pass `--config <path>`, or place one at `~/.bridge/schedule/configs/<repo-name>/bridge.config.json`.
 
 ```bash
 # URL clone — supply a config (typical repos do not commit one):

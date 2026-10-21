@@ -2,13 +2,17 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  BRIDGE_COMMIT_TRAILER,
+  buildBridgeCommitMessage,
   buildPullRequestBody,
   createPullRequest,
   decidePullRequestReuse,
   findReusableBridgePullRequest,
+  formatDuplicatePullRequestNotice,
   getForeignPullRequestCommits,
   getGitHubRepository,
   getStablePullRequestIdentity,
+  hasBridgeCommitMarker,
   isBridgeAuthoredCommit,
   makePullRequestScopeKey,
   parseBridgePrMarker,
@@ -412,6 +416,66 @@ test('legacy Bridge PRs without a reuse marker are updated', () => {
   assert.equal(decision.action, 'update');
 });
 
+test('Bridge commit messages include a trailer marker', () => {
+  const message = buildBridgeCommitMessage();
+  assert.match(message, /^bridge: update dependencies \(non-breaking\)/);
+  assert.match(message, new RegExp(`^${BRIDGE_COMMIT_TRAILER}$`, 'm'));
+  assert.equal(
+    hasBridgeCommitMarker({
+      messageHeadline: 'bridge: update dependencies (non-breaking)',
+      messageBody: BRIDGE_COMMIT_TRAILER
+    }),
+    true
+  );
+});
+
+test('a PR-author commit with Bridge subject is foreign without the Bridge trailer', () => {
+  const commits = [
+    {
+      messageHeadline: 'bridge: update dependencies (non-breaking)',
+      authors: [{ name: 'Dev', email: 'dev@example.test', login: 'dev' }]
+    }
+  ];
+
+  assert.equal(
+    isBridgeAuthoredCommit(commits[0], {
+      expectedAuthors: [{ name: 'Dev', email: 'dev@example.test', login: 'dev' }]
+    }),
+    false
+  );
+  assert.equal(
+    getForeignPullRequestCommits(commits, {
+      expectedAuthors: [{ name: 'Dev', login: 'dev' }]
+    }).length,
+    1
+  );
+
+  const decision = decidePullRequestReuse({
+    identical: false,
+    localScopeKey: 'abc',
+    remoteMarker: { scopeKey: 'abc' },
+    foreignCommits: getForeignPullRequestCommits(commits, {
+      expectedAuthors: [{ name: 'Dev', login: 'dev' }]
+    })
+  });
+
+  assert.equal(decision.action, 'open_new');
+  assert.match(decision.reason, /did not author/);
+});
+
+test('a human-authored commit with the Bridge trailer is treated as Bridge-owned', () => {
+  const commits = [
+    {
+      messageHeadline: 'bridge: update dependencies (non-breaking)',
+      messageBody: 'Bridge-Commit: true\n',
+      authors: [{ name: 'Dev', email: 'dev@example.test', login: 'dev' }]
+    }
+  ];
+
+  assert.equal(isBridgeAuthoredCommit(commits[0]), true);
+  assert.equal(getForeignPullRequestCommits(commits).length, 0);
+});
+
 test('reviewer commits are foreign even when the subject uses the Bridge prefix', () => {
   const commits = [
     {
@@ -562,6 +626,86 @@ test('findReusableBridgePullRequest prefers the oldest matching open Bridge PR',
 
   assert.equal(result.number, 9);
   assert.equal(result.reuseAction, 'update');
+  assert.equal(result.duplicatePullRequests.length, 1);
+  assert.equal(result.duplicatePullRequests[0].number, 10);
+  assert.equal(result.duplicatePullRequests[0].older, false);
+  assert.match(
+    formatDuplicatePullRequestNotice(result.duplicatePullRequests),
+    /Other matching Bridge PR\(s\): #10/
+  );
+});
+
+test('findReusableBridgePullRequest flags older duplicate matching PRs', async () => {
+  const localDiff =
+    'diff --git a/package-lock.json b/package-lock.json\n--- a/package-lock.json\n+++ b/package-lock.json\n@@ -1 +1 @@\n-old\n+new\n';
+  const remoteDiff =
+    'diff --git a/package-lock.json b/package-lock.json\n--- a/package-lock.json\n+++ b/package-lock.json\n@@ -1 +1 @@\n-older\n+newer\n';
+  const scopeKey = makePullRequestScopeKey({
+    configSha256: 'abc',
+    updateCommands: ['npm update']
+  });
+  const result = await findReusableBridgePullRequest({
+    cwd: '/tmp/repo',
+    repoUrl: 'https://github.com/example/project.git',
+    baseBranch: 'main',
+    branchPrefix: 'bridge/patch',
+    stagedDiff: localDiff,
+    scopeKey,
+    commandExistsFn: async () => true,
+    runCommandFn: async (command) => {
+      if (command.startsWith('gh pr list')) {
+        return {
+          success: true,
+          stdout: JSON.stringify([
+            {
+              number: 5,
+              url: 'https://github.com/example/project/pull/5',
+              title: 'bridge: update dependencies (non-breaking)',
+              headRefName: 'bridge/patch-2026-09-01',
+              baseRefName: 'main',
+              body: buildPullRequestBody({
+                branchName: 'bridge/patch-2026-09-01',
+                baseBranch: 'main',
+                scopeMeta: { v: 1, scopeKey }
+              })
+            },
+            {
+              number: 12,
+              url: 'https://github.com/example/project/pull/12',
+              title: 'bridge: update dependencies (non-breaking)',
+              headRefName: 'bridge/patch-2026-10-12',
+              baseRefName: 'main',
+              body: buildPullRequestBody({
+                branchName: 'bridge/patch-2026-10-12',
+                baseBranch: 'main',
+                scopeMeta: { v: 1, scopeKey }
+              })
+            }
+          ])
+        };
+      }
+      if (command.startsWith('gh pr view')) {
+        return prViewCommits();
+      }
+      if (command.startsWith('gh pr diff')) {
+        if (command.includes('12')) {
+          return { success: true, stdout: localDiff, stderr: '' };
+        }
+        return { success: true, stdout: remoteDiff, stderr: '' };
+      }
+      return { success: false, stdout: '', stderr: 'unexpected' };
+    }
+  });
+
+  assert.equal(result.number, 12);
+  assert.equal(result.reuseAction, 'reuse_identical');
+  assert.equal(result.duplicatePullRequests.length, 1);
+  assert.equal(result.duplicatePullRequests[0].number, 5);
+  assert.equal(result.duplicatePullRequests[0].older, true);
+  assert.match(
+    formatDuplicatePullRequestNotice(result.duplicatePullRequests),
+    /Older duplicate matching Bridge PR\(s\): #5 \(https:\/\/github.com\/example\/project\/pull\/5\)/
+  );
 });
 
 test('findReusableBridgePullRequest refuses to update over reviewer-authored commits', async () => {

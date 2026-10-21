@@ -243,7 +243,7 @@ test('cleanupLocalConfigAfterSuccessfulPush keeps a config path that appears in 
 });
 
 test('patch defaults to a candidate-branch push without touching the local branch', async (t) => {
-  const { repoDir, defaultBranch } = await createRepoWithOrigin(t, {
+  const { root, repoDir, defaultBranch } = await createRepoWithOrigin(t, {
     defaultBranch: 'main'
   });
   const originalHead = (await git(repoDir, 'rev-parse HEAD')).stdout.trim();
@@ -320,12 +320,28 @@ test('patch defaults to a candidate-branch push without touching the local branc
   const headBeforeDryRun = (await git(repoDir, 'rev-parse HEAD')).stdout.trim();
 
   assert.notEqual(headBeforeDryRun, originalHead);
+  const binDir = path.join(root, 'bin');
+  await fs.mkdir(binDir, { recursive: true });
+  await fs.writeFile(
+    path.join(binDir, 'gh'),
+    `#!/usr/bin/env bash
+if [[ "$1" == "pr" && "$2" == "list" ]]; then
+  echo '[]'
+  exit 0
+fi
+exit 1
+`,
+    { mode: 0o755 }
+  );
   const result = await runCommand(
     `${quote(process.execPath)} ${quote(cliPath)} patch`,
     {
       cwd: repoDir,
       quiet: true,
-      env: gitEnv
+      env: {
+        ...gitEnv,
+        PATH: `${binDir}:${process.env.PATH}`
+      }
     }
   );
   assert.equal(result.success, true);

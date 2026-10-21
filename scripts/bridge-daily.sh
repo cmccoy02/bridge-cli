@@ -20,8 +20,13 @@
 #   --summary-dir <dir>   Dated summary destination (default:
 #                         $BRIDGE_HOME/schedule/summaries/<name>).
 #   --config <path>       Copy this Bridge config into the isolated workdir
-#                         before running. Required for a fresh URL clone
-#                         unless a config is already committed or present at
+#                         before running. Highest priority every run. Without
+#                         --config, the developer's current checkout config
+#                         is re-copied; then $BRIDGE_HOME/schedule/configs.
+#                         A leftover copy from an earlier run is never reused
+#                         ahead of those sources. Required for a fresh URL
+#                         clone unless a config is already committed or
+#                         present at
 #                         $BRIDGE_HOME/schedule/configs/<name>/bridge.config.json.
 #   --bridge <cmd>        Bridge executable (default: bridge on PATH, else
 #                         this repo's bin/bridge.js).
@@ -45,7 +50,7 @@
 set -euo pipefail
 
 usage() {
-  sed -n '2,44p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,48p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 is_git_checkout() {
@@ -109,22 +114,41 @@ abs_path() {
   printf '%s/%s' "$parent" "$(basename "$target")"
 }
 
-has_bridge_config() {
-  local dir="$1"
-  [[ -f "$dir/bridge.config.json" || -f "$dir/.bridge.config.json" ]]
+config_basename() {
+  case "$(basename "$1")" in
+    .bridge.config.json)
+      printf '%s' '.bridge.config.json'
+      ;;
+    *)
+      printf '%s' 'bridge.config.json'
+      ;;
+  esac
 }
 
-# Copy --config, the source checkout's untracked config, or the known
-# schedule/configs location into the isolated workdir.
+config_sha256() {
+  local file="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$file" | awk '{print $1}'
+  elif command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 "$file" | awk '{print $NF}'
+  else
+    printf '%s' 'unavailable'
+  fi
+}
+
+# Resolve --config, the developer's current checkout, or the known
+# schedule/configs location. Re-copy on every run so a leftover file in
+# the isolated workdir cannot hide a newer checkout config.
 install_bridge_config() {
   local dest="$1"
   local src=""
   local dest_name="bridge.config.json"
+  local used="$dest"
 
   if [[ -n "$config_path" ]]; then
     src="$config_path"
-  elif has_bridge_config "$dest"; then
-    return 0
   elif [[ -n "$source_repo" && -f "$source_repo/bridge.config.json" ]]; then
     src="$source_repo/bridge.config.json"
   elif [[ -n "$source_repo" && -f "$source_repo/.bridge.config.json" ]]; then
@@ -135,6 +159,14 @@ install_bridge_config() {
     src="$known_config_dir/.bridge.config.json"
   elif [[ -f "$known_config_file" ]]; then
     src="$known_config_file"
+  elif [[ -f "$dest/bridge.config.json" ]]; then
+    used="$dest/bridge.config.json"
+    echo "Using config: $used (sha256:$(config_sha256 "$used"))"
+    return 0
+  elif [[ -f "$dest/.bridge.config.json" ]]; then
+    used="$dest/.bridge.config.json"
+    echo "Using config: $used (sha256:$(config_sha256 "$used"))"
+    return 0
   else
     return 0
   fi
@@ -144,17 +176,11 @@ install_bridge_config() {
     exit 3
   fi
 
-  case "$(basename "$src")" in
-    .bridge.config.json)
-      dest_name=".bridge.config.json"
-      ;;
-    *)
-      dest_name="bridge.config.json"
-      ;;
-  esac
-
+  dest_name="$(config_basename "$src")"
   cp "$src" "$dest/$dest_name"
-  echo "Installed config: $dest/$dest_name"
+  used="$dest/$dest_name"
+  echo "Installed config: $used"
+  echo "Using config: $src (sha256:$(config_sha256 "$used"))"
 }
 
 # Parse this invocation's run-id from Bridge output. Do not pick the newest

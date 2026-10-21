@@ -145,3 +145,15 @@ test('writeScriptCommandLog redacts secrets and writeRunSummaryFile persists mar
   assert.match(markdown, /npm test/);
   assert.match(summaryPath, /bridge-summary\.md$/);
 });
+
+test('docs/after-scripts.md lists recommended after scripts and CI log format', async () => {
+  const text = await fs.readFile(new URL('../docs/after-scripts.md', import.meta.url), 'utf8');
+
+  assert.match(text, /CI log format/i);
+  assert.match(text, /Success means/i);
+  for (const name of ['Lint', 'Test', 'Build', 'Typecheck', 'Format check']) {
+    assert.match(text, new RegExp(name, 'i'));
+  }
+  assert.match(text, /After-script summary/);
+  assert.match(text, /fail\s*\/\s*`new`|`new`/);
+});
