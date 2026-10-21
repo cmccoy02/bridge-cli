@@ -4,14 +4,19 @@
 # mkdir -p ~/.bridge/schedule/logs
 #
 # PATH must include node, git, and `bridge` (or rely on the wrapper's
-# fallback to this repo's bin/bridge.js). The wrapper lockfile prevents
-# overlapping runs if a previous job is still going.
+# fallback to this repo's bin/bridge.js). Cron starts with a minimal PATH,
+# so replace REPLACE_NODE_BIN_DIR with the directory that contains `node`
+# (`dirname "$(command -v node)"`, often /usr/local/bin, /opt/homebrew/bin,
+# or ~/.nvm/versions/node/<ver>/bin).
+# The wrapper lockfile prevents overlapping runs if a previous job is still
+# going. A fresh URL clone needs --config (or a file at
+# ~/.bridge/schedule/configs/<repo>/bridge.config.json).
 
 SHELL=/bin/bash
-PATH=/usr/local/bin:/usr/bin:/bin
+PATH=REPLACE_NODE_BIN_DIR:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin
 BRIDGE_HOME=/home/REPLACE_USER/.bridge
 
-30 7 * * * /bin/bash REPLACE_PATH_TO_BRIDGE_CLI/scripts/bridge-daily.sh --repo REPLACE_GIT_URL_OR_CHECKOUT --branch main >> $BRIDGE_HOME/schedule/logs/daily.log 2>&1
+30 7 * * * /bin/bash REPLACE_PATH_TO_BRIDGE_CLI/scripts/bridge-daily.sh --repo REPLACE_GIT_URL_OR_CHECKOUT --branch main --config REPLACE_PATH_TO_BRIDGE_CONFIG >> $BRIDGE_HOME/schedule/logs/daily.log 2>&1
 
 # Every 12 hours instead of daily:
-# 30 7,19 * * * /bin/bash REPLACE_PATH_TO_BRIDGE_CLI/scripts/bridge-daily.sh --repo REPLACE_GIT_URL_OR_CHECKOUT --branch main >> $BRIDGE_HOME/schedule/logs/daily.log 2>&1
+# 30 7,19 * * * /bin/bash REPLACE_PATH_TO_BRIDGE_CLI/scripts/bridge-daily.sh --repo REPLACE_GIT_URL_OR_CHECKOUT --branch main --config REPLACE_PATH_TO_BRIDGE_CONFIG >> $BRIDGE_HOME/schedule/logs/daily.log 2>&1

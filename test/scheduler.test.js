@@ -7,6 +7,12 @@ import test from 'node:test';
 import { runCommand } from '../src/core/executor.js';
 
 const wrapperPath = new URL('../scripts/bridge-daily.sh', import.meta.url).pathname;
+const crontabExamplePath = new URL('../scripts/schedule/crontab.example', import.meta.url)
+  .pathname;
+const launchdExamplePath = new URL(
+  '../scripts/schedule/com.bridge.daily.plist.example',
+  import.meta.url
+).pathname;
 
 const gitEnv = {
   ...process.env,
@@ -49,24 +55,51 @@ async function createOriginRepo(t) {
   return { root, originDir };
 }
 
+async function createLocalCheckout(t) {
+  const { root, originDir } = await createOriginRepo(t);
+  const checkout = path.join(root, 'checkout');
+  await runCommand(`git clone ${quote(originDir)} ${quote(checkout)}`, {
+    cwd: root,
+    quiet: true,
+    env: gitEnv
+  });
+  await git(checkout, 'config user.name "Bridge Test"');
+  await git(checkout, 'config user.email bridge@example.test');
+  return { root, originDir, checkout };
+}
+
 function quote(value) {
   return `'${String(value).replace(/'/g, `'\\''`)}'`;
 }
 
-async function writeFakeBridge(binDir, { exitCode = 0, writeSummary = true } = {}) {
+async function writeFakeBridge(
+  binDir,
+  { exitCode = 0, writeSummary = true, requireConfig = false, runIdPrefix = 'patch-this' } = {}
+) {
   const fake = path.join(binDir, 'bridge');
   const script = `#!/usr/bin/env bash
 set -euo pipefail
 echo "fake-bridge $*"
+${
+  requireConfig
+    ? `if [[ ! -f bridge.config.json && ! -f .bridge.config.json ]]; then
+  echo "error: no bridge.config.json in $(pwd)" >&2
+  exit 1
+fi
+`
+    : ''
+}
 if [[ "${writeSummary ? 1 : 0}" -eq 1 ]]; then
-  run_dir="\${BRIDGE_HOME}/runs/patch-fake"
+  run_id="${runIdPrefix}-$$"
+  run_dir="\${BRIDGE_HOME}/runs/\${run_id}"
   mkdir -p "$run_dir/scripts"
   cat > "$run_dir/bridge-summary.md" <<'EOF'
 # Bridge after-script summary
-| Script | Result | Failure | Duration | Log |
-| npm test | pass | — | 1ms | /tmp/test.log |
+THIS_RUN_MARKER
 EOF
   echo '{}' > "$run_dir/bridge-report.v1.json"
+  echo "Summary file: $run_dir/bridge-summary.md"
+  echo "Report: $run_dir/bridge-report.v1.json"
 fi
 exit ${exitCode}
 `;
@@ -81,6 +114,29 @@ async function runWrapper(args, { cwd, env }) {
     allowFailure: true,
     env: { ...gitEnv, ...env }
   });
+}
+
+function wrapperEnv(bridgeHome, binDir, fakeBridge) {
+  return {
+    BRIDGE_HOME: bridgeHome,
+    PATH: `${binDir}:${process.env.PATH}`,
+    BRIDGE_BIN: fakeBridge
+  };
+}
+
+async function readLatestSummary(bridgeHome) {
+  const summaries = path.join(bridgeHome, 'schedule', 'summaries');
+  const found = await fs.readdir(summaries, { recursive: true });
+  const summaryRel = found.find((name) => name.endsWith('bridge-summary.md'));
+  assert.ok(summaryRel, `no summary under ${summaries}: ${found.join(', ')}`);
+  const summaryPath = path.join(summaries, summaryRel);
+  const destDir = path.dirname(summaryPath);
+  return {
+    summaryPath,
+    destDir,
+    text: await fs.readFile(summaryPath, 'utf8'),
+    runId: (await fs.readFile(path.join(destDir, 'run-id.txt'), 'utf8')).trim()
+  };
 }
 
 test('wrapper prints usage and exits 3 without --repo', async (t) => {
@@ -99,15 +155,12 @@ test('wrapper copies the compact summary and exits 0 on a successful Bridge run'
 
   const result = await runWrapper(`--repo ${quote(originDir)} --branch main`, {
     cwd: root,
-    env: {
-      BRIDGE_HOME: bridgeHome,
-      PATH: `${binDir}:${process.env.PATH}`,
-      BRIDGE_BIN: fakeBridge
-    }
+    env: wrapperEnv(bridgeHome, binDir, fakeBridge)
   });
 
   assert.equal(result.success, true, `${result.stdout}\n${result.stderr}`);
   assert.match(result.stdout, /Saved summary:/);
+  assert.match(result.stdout, /Captured run-id:/);
   const summaries = path.join(bridgeHome, 'schedule', 'summaries');
   const found = await fs.readdir(summaries, { recursive: true });
   assert.ok(found.some((name) => name.endsWith('bridge-summary.md')));
@@ -122,11 +175,7 @@ test('wrapper exits non-zero when Bridge fails', async (t) => {
 
   const result = await runWrapper(`--repo ${quote(originDir)} --branch main`, {
     cwd: root,
-    env: {
-      BRIDGE_HOME: bridgeHome,
-      PATH: `${binDir}:${process.env.PATH}`,
-      BRIDGE_BIN: fakeBridge
-    }
+    env: wrapperEnv(bridgeHome, binDir, fakeBridge)
   });
 
   assert.equal(result.success, false);
@@ -148,11 +197,7 @@ test('wrapper exits 2 when a live lock is held', async (t) => {
 
   const result = await runWrapper(`--repo ${quote(originDir)} --branch main`, {
     cwd: root,
-    env: {
-      BRIDGE_HOME: bridgeHome,
-      PATH: `${binDir}:${process.env.PATH}`,
-      BRIDGE_BIN: fakeBridge
-    }
+    env: wrapperEnv(bridgeHome, binDir, fakeBridge)
   });
 
   assert.equal(result.code, 2, `${result.stdout}\n${result.stderr}`);
@@ -173,12 +218,168 @@ test('wrapper reclaims a stale lock and then runs', async (t) => {
 
   const result = await runWrapper(`--repo ${quote(originDir)} --branch main`, {
     cwd: root,
-    env: {
-      BRIDGE_HOME: bridgeHome,
-      PATH: `${binDir}:${process.env.PATH}`,
-      BRIDGE_BIN: fakeBridge
-    }
+    env: wrapperEnv(bridgeHome, binDir, fakeBridge)
   });
 
   assert.equal(result.success, true, `${result.stdout}\n${result.stderr}`);
+});
+
+test('wrapper ignores untracked bridge.config.json when checking a local checkout', async (t) => {
+  const { root, checkout } = await createLocalCheckout(t);
+  const bridgeHome = path.join(root, 'bridge-home');
+  const binDir = path.join(root, 'bin');
+  await fs.mkdir(binDir, { recursive: true });
+  const fakeBridge = await writeFakeBridge(binDir, { exitCode: 0 });
+  await fs.writeFile(path.join(checkout, 'bridge.config.json'), '{}\n', 'utf8');
+
+  const result = await runWrapper(`--repo ${quote(checkout)} --branch main`, {
+    cwd: root,
+    env: wrapperEnv(bridgeHome, binDir, fakeBridge)
+  });
+
+  assert.equal(result.success, true, `${result.stdout}\n${result.stderr}`);
+  assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /dirty worktree/);
+});
+
+test('wrapper still refuses a local checkout with non-config dirty files', async (t) => {
+  const { root, checkout } = await createLocalCheckout(t);
+  const bridgeHome = path.join(root, 'bridge-home');
+  const binDir = path.join(root, 'bin');
+  await fs.mkdir(binDir, { recursive: true });
+  const fakeBridge = await writeFakeBridge(binDir, { exitCode: 0 });
+  await fs.writeFile(path.join(checkout, 'bridge.config.json'), '{}\n', 'utf8');
+  await fs.writeFile(path.join(checkout, 'wip.txt'), 'dirty\n', 'utf8');
+
+  const result = await runWrapper(`--repo ${quote(checkout)} --branch main`, {
+    cwd: root,
+    env: wrapperEnv(bridgeHome, binDir, fakeBridge)
+  });
+
+  assert.equal(result.code, 1, `${result.stdout}\n${result.stderr}`);
+  assert.match(`${result.stdout}\n${result.stderr}`, /dirty worktree/);
+});
+
+test('wrapper does not change the developer checkout branch', async (t) => {
+  const { root, checkout } = await createLocalCheckout(t);
+  const bridgeHome = path.join(root, 'bridge-home');
+  const binDir = path.join(root, 'bin');
+  await fs.mkdir(binDir, { recursive: true });
+  const fakeBridge = await writeFakeBridge(binDir, { exitCode: 0, requireConfig: true });
+
+  await git(checkout, 'checkout -b feature');
+  await fs.writeFile(path.join(checkout, 'bridge.config.json'), '{"name":"local"}\n', 'utf8');
+  const before = (await git(checkout, 'rev-parse --abbrev-ref HEAD')).stdout.trim();
+  assert.equal(before, 'feature');
+
+  const result = await runWrapper(`--repo ${quote(checkout)} --branch main`, {
+    cwd: root,
+    env: wrapperEnv(bridgeHome, binDir, fakeBridge)
+  });
+
+  assert.equal(result.success, true, `${result.stdout}\n${result.stderr}`);
+  const after = (await git(checkout, 'rev-parse --abbrev-ref HEAD')).stdout.trim();
+  assert.equal(after, 'feature');
+  const isolated = path.join(bridgeHome, 'schedule', 'repos', 'checkout');
+  const isolatedHead = (await git(isolated, 'rev-parse --abbrev-ref HEAD')).stdout.trim();
+  assert.equal(isolatedHead, 'HEAD');
+  await fs.access(path.join(isolated, 'bridge.config.json'));
+});
+
+test('wrapper copies this run-id summary instead of the newest file on disk', async (t) => {
+  const { root, originDir } = await createOriginRepo(t);
+  const bridgeHome = path.join(root, 'bridge-home');
+  const binDir = path.join(root, 'bin');
+  await fs.mkdir(binDir, { recursive: true });
+  const fakeBridge = await writeFakeBridge(binDir, { exitCode: 0, runIdPrefix: 'patch-this' });
+
+  const otherDir = path.join(bridgeHome, 'runs', 'patch-other-newer');
+  await fs.mkdir(otherDir, { recursive: true });
+  await fs.writeFile(path.join(otherDir, 'bridge-summary.md'), 'CONCURRENT_OTHER_RUN\n', 'utf8');
+  const future = new Date('2030-01-01T00:00:00Z');
+  await fs.utimes(path.join(otherDir, 'bridge-summary.md'), future, future);
+
+  const result = await runWrapper(`--repo ${quote(originDir)} --branch main`, {
+    cwd: root,
+    env: wrapperEnv(bridgeHome, binDir, fakeBridge)
+  });
+
+  assert.equal(result.success, true, `${result.stdout}\n${result.stderr}`);
+  const saved = await readLatestSummary(bridgeHome);
+  assert.match(saved.text, /THIS_RUN_MARKER/);
+  assert.doesNotMatch(saved.text, /CONCURRENT_OTHER_RUN/);
+  assert.match(saved.runId, /^patch-this-/);
+  assert.match(result.stdout, new RegExp(`Captured run-id: ${saved.runId}`));
+});
+
+test('wrapper copies --config into a fresh URL clone', async (t) => {
+  const { root, originDir } = await createOriginRepo(t);
+  const bridgeHome = path.join(root, 'bridge-home');
+  const binDir = path.join(root, 'bin');
+  await fs.mkdir(binDir, { recursive: true });
+  const fakeBridge = await writeFakeBridge(binDir, { exitCode: 0, requireConfig: true });
+  const configPath = path.join(root, 'provided.config.json');
+  await fs.writeFile(configPath, '{"name":"from-flag"}\n', 'utf8');
+
+  const result = await runWrapper(
+    `--repo ${quote(originDir)} --branch main --config ${quote(configPath)}`,
+    {
+      cwd: root,
+      env: wrapperEnv(bridgeHome, binDir, fakeBridge)
+    }
+  );
+
+  assert.equal(result.success, true, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stdout, /Installed config:/);
+  const repoName = path.basename(originDir).replace(/\.git$/, '');
+  const installed = await fs.readFile(
+    path.join(bridgeHome, 'schedule', 'repos', repoName, 'bridge.config.json'),
+    'utf8'
+  );
+  assert.match(installed, /from-flag/);
+});
+
+test('wrapper copies config from the known schedule/configs location', async (t) => {
+  const { root, originDir } = await createOriginRepo(t);
+  const bridgeHome = path.join(root, 'bridge-home');
+  const binDir = path.join(root, 'bin');
+  await fs.mkdir(binDir, { recursive: true });
+  const fakeBridge = await writeFakeBridge(binDir, { exitCode: 0, requireConfig: true });
+  const repoName = path.basename(originDir).replace(/\.git$/, '');
+  const knownDir = path.join(bridgeHome, 'schedule', 'configs', repoName);
+  await fs.mkdir(knownDir, { recursive: true });
+  await fs.writeFile(path.join(knownDir, 'bridge.config.json'), '{"name":"known-location"}\n', 'utf8');
+
+  const result = await runWrapper(`--repo ${quote(originDir)} --branch main`, {
+    cwd: root,
+    env: wrapperEnv(bridgeHome, binDir, fakeBridge)
+  });
+
+  assert.equal(result.success, true, `${result.stdout}\n${result.stderr}`);
+  const installed = await fs.readFile(
+    path.join(bridgeHome, 'schedule', 'repos', repoName, 'bridge.config.json'),
+    'utf8'
+  );
+  assert.match(installed, /known-location/);
+});
+
+test('wrapper exits 3 when --config is missing', async (t) => {
+  const cwd = await makeTempDir(t);
+  const result = await runWrapper('--repo /tmp/unused --config /no/such/bridge.config.json', {
+    cwd,
+    env: { BRIDGE_HOME: cwd }
+  });
+  assert.equal(result.code, 3);
+  assert.match(`${result.stdout}\n${result.stderr}`, /--config is not a readable file/);
+});
+
+test('cron example PATH includes a node bindir placeholder', async () => {
+  const text = await fs.readFile(crontabExamplePath, 'utf8');
+  assert.match(text, /^PATH=REPLACE_NODE_BIN_DIR:/m);
+  assert.match(text, /--config REPLACE_PATH_TO_BRIDGE_CONFIG/);
+});
+
+test('launchd example forwards --config', async () => {
+  const text = await fs.readFile(launchdExamplePath, 'utf8');
+  assert.match(text, /--config/);
+  assert.match(text, /REPLACE_PATH_TO_BRIDGE_CONFIG/);
 });
