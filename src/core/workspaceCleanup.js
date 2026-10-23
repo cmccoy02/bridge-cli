@@ -4,8 +4,28 @@ import path from 'node:path';
 
 const DEFAULT_STALE_MS = 24 * 60 * 60 * 1000;
 
+export function sanitizeWorkspaceSegment(value) {
+  const normalized = String(value || 'repo')
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+
+  return normalized || 'repo';
+}
+
 export function isBridgeTempWorkspaceName(name) {
-  return /^bridge-[a-z0-9._-]+-\d+$/i.test(String(name || ''));
+  return /^bridge-[a-z0-9._-]+-\d+(-[a-z0-9]+)?$/i.test(String(name || ''));
+}
+
+export async function createIsolatedWorkspace(
+  repoName,
+  { tmpDir = os.tmpdir(), nowMs = Date.now() } = {}
+) {
+  const prefix = path.join(
+    tmpDir,
+    `bridge-${sanitizeWorkspaceSegment(repoName)}-${nowMs}-`
+  );
+  return fs.mkdtemp(prefix);
 }
 
 export async function removeWorkspace(tempDir) {

@@ -7,6 +7,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import {
+  createIsolatedWorkspace,
   exitCodeForSignal,
   isBridgeTempWorkspaceName,
   removeWorkspace,
@@ -23,8 +24,23 @@ async function makeTempDir(t) {
 
 test('bridge temp workspace names match the isolated copy pattern', () => {
   assert.equal(isBridgeTempWorkspaceName('bridge-travelpassbook.com-1790805719488'), true);
+  assert.equal(isBridgeTempWorkspaceName('bridge-travelpassbook.com-1790805719488-xxxxxx'), true);
   assert.equal(isBridgeTempWorkspaceName('bridge-cleanup-abc'), false);
   assert.equal(isBridgeTempWorkspaceName('not-bridge-1'), false);
+});
+
+test('createIsolatedWorkspace gives each caller a unique directory', async (t) => {
+  const tmpDir = await makeTempDir(t);
+  const [first, second] = await Promise.all([
+    createIsolatedWorkspace('same-repo', { tmpDir }),
+    createIsolatedWorkspace('same-repo', { tmpDir })
+  ]);
+
+  assert.notEqual(first, second);
+  assert.equal(isBridgeTempWorkspaceName(path.basename(first)), true);
+  assert.equal(isBridgeTempWorkspaceName(path.basename(second)), true);
+  await fs.access(first);
+  await fs.access(second);
 });
 
 test('removeWorkspace deletes the isolated copy', async (t) => {

@@ -13,6 +13,7 @@
     "templates",
     "scripts/bridge-daily.sh",
     "scripts/schedule",
+    "docs",
     "README.md",
     "LICENSE"
   ],

@@ -6,6 +6,13 @@ import { configCommand } from '../src/commands/config.js';
 import { initCommand } from '../src/commands/init.js';
 import { patchCommand } from '../src/commands/patch.js';
 import { reportCommand } from '../src/commands/report.js';
+import {
+  scheduleInstallCommand,
+  scheduleLatestCommand,
+  scheduleRunCommand,
+  scheduleStatusCommand,
+  scheduleUninstallCommand
+} from '../src/commands/schedule.js';
 import { doctorCommand, validateCommand } from '../src/commands/validate.js';
 import { getBridgeVersion } from '../src/core/bridgeVersion.js';
 import { error } from '../src/ui/logger.js';
@@ -131,6 +138,104 @@ program
       limit: options.limit
     });
 
+    if (!ok) {
+      process.exitCode = 1;
+    }
+  });
+
+const schedule = program
+  .command('schedule')
+  .description(
+    'Install or run local scheduling (CLI-managed launchd/cron, or the modular bridge-daily.sh runner)'
+  );
+
+schedule
+  .command('install')
+  .description('Write a launchd plist or cron snippet for unattended daily runs')
+  .option('--repo <git-url-or-path>', 'Repository to schedule (repeatable)', collectOption, [])
+  .option('--branch <name>', 'Default branch', 'main')
+  .option('--config <path>', 'Bridge config to copy into the isolated clone')
+  .option('--time <HH:MM>', 'Local time to run', '07:30')
+  .option('--runner <cli|script>', 'cli = bridge schedule run; script = bridge-daily.sh', 'cli')
+  .option('--print', 'Print the generated unit instead of writing it')
+  .option('--cron', 'Write a cron snippet even on macOS')
+  .option('--launchd', 'Write a LaunchAgent even when --print is not set')
+  .action(async (options) => {
+    const ok = await scheduleInstallCommand({
+      repo: options.repo,
+      branch: options.branch,
+      config: options.config,
+      time: options.time,
+      runner: options.runner,
+      print: options.print,
+      cron: options.cron,
+      launchd: options.launchd
+    });
+    if (!ok) {
+      process.exitCode = 1;
+    }
+  });
+
+schedule
+  .command('uninstall')
+  .description('Remove generated LaunchAgent / cron snippet files')
+  .option('--unload', 'Print the launchctl bootout command')
+  .action(async (options) => {
+    const ok = await scheduleUninstallCommand({ unload: options.unload });
+    if (!ok) {
+      process.exitCode = 1;
+    }
+  });
+
+schedule
+  .command('status')
+  .description('Show whether a generated schedule file and latest summary exist')
+  .action(async () => {
+    const ok = await scheduleStatusCommand();
+    if (!ok) {
+      process.exitCode = 1;
+    }
+  });
+
+schedule
+  .command('run')
+  .description(
+    'Run one or more repos now (scheduled defaults: skip before-scripts, per-repo lock, concurrency 2)'
+  )
+  .option('--repo <git-url-or-path>', 'Repository to run (repeatable)', collectOption, [])
+  .option('--branch <name>', 'Default branch')
+  .option('--config <path>', 'Bridge config to copy into the isolated clone')
+  .option('--concurrency <n>', 'Max parallel repos', '2')
+  .option('--dry-run', 'Pass --dry-run to each Bridge run')
+  .option('--run-before-scripts', 'Do not skip beforeScripts (scheduled default stays skipped)')
+  .option('--notify', 'Show a local notification after the daily summary is written')
+  .option('--notify-command <cmd>', 'Command to run with BRIDGE_SUMMARY_PATH / BRIDGE_SUMMARY_TEXT')
+  .action(async (options) => {
+    const ok = await scheduleRunCommand({
+      repo: options.repo,
+      branch: options.branch,
+      config: options.config,
+      concurrency: options.concurrency,
+      dryRun: options.dryRun,
+      runBeforeScripts: options.runBeforeScripts,
+      notify: options.notify,
+      notifyCommand: options.notifyCommand
+    });
+    if (!ok) {
+      process.exitCode = 1;
+    }
+  });
+
+schedule
+  .command('latest')
+  .description('Print the latest daily summary (~/.bridge/schedule/LATEST.md)')
+  .option('--json', 'Print path + text as JSON')
+  .option('--notify', 'Re-send the latest summary through the local notification hook')
+  .action(async (options) => {
+    const ok = await scheduleLatestCommand({
+      json: options.json,
+      notify: options.notify
+    });
     if (!ok) {
       process.exitCode = 1;
     }

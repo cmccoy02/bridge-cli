@@ -8,8 +8,10 @@
 # so replace REPLACE_NODE_BIN_DIR with the directory that contains `node`
 # (`dirname "$(command -v node)"`, often /usr/local/bin, /opt/homebrew/bin,
 # or ~/.nvm/versions/node/<ver>/bin).
-# The wrapper lockfile prevents overlapping runs if a previous job is still
-# going. A fresh URL clone needs --config (or a file at
+# The wrapper lockfile prevents overlapping runs of the same repo if a
+# previous job is still going. Different repos may run at the same time.
+# Alternative: `bridge schedule install --runner cli --cron`.
+# A fresh URL clone needs --config (or a file at
 # ~/.bridge/schedule/configs/<repo>/bridge.config.json).
 
 SHELL=/bin/bash

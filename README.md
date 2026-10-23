@@ -183,8 +183,47 @@ raw `bridge-report.v1` document or pass a run ID to inspect a specific run.
 
 Prints the current `bridge.config.json` to the terminal.
 
-Bridge also writes local operation logs to:
-- `~/.bridge/logs/operations.log`
+### `bridge schedule`
+
+Local-only scheduling. Two approaches, both minimal — pick one (tradeoffs in
+`docs/scheduling.md`):
+
+- **Embedded CLI:** `bridge schedule install --repo <url> --config <path>` writes
+  a LaunchAgent or cron snippet that calls `bridge schedule run`.
+- **Modular runner:** keep using `scripts/bridge-daily.sh` plus the example
+  plist/crontab. The CLI is not required.
+
+```bash
+bridge schedule install --repo git@github.com:org/app.git --config ./bridge.config.json --print
+bridge schedule run --repo /path/to/app-a --repo /path/to/app-b --concurrency 2 --dry-run
+bridge schedule latest
+```
+
+Scheduled runs keep `--skip-before-scripts` on. `schedule run` can start two
+repos at once; the same repo is still locked so branches/PRs cannot clash.
+
+### Logs as signal
+
+Logs are **not** a debug console. Noisy command output lives in
+`~/.bridge/runs/<run-id>/scripts/*.log`. The operation stream exists so a later
+"time saved" view can add up unattended work without opening GitHub.
+
+- `~/.bridge/logs/operations.log` — append-only JSONL of every operation. Concurrent
+  runs take a short lock so lines stay intact. Each line may include `runId`,
+  `pid`, and (on `run_signal` / `run_finished`) duration, packages updated,
+  scripts run, outcome, and PR created/updated/reused.
+- `~/.bridge/runs/<run-id>/operations.jsonl` — the same events for one run, so
+  two live runs never share a write file.
+- `~/.bridge/runs/<run-id>/bridge-report.v1.json` — evidence pack. Includes
+  `timeSaved` (schema `bridge-time-saved.v1`) and `performance` (wall ms, peak
+  RSS, CPU user/sys).
+- `~/.bridge/schedule/LATEST.md` — today's human daily summary (also under
+  `schedule/summaries/daily/YYYY-MM-DD.md`).
+
+Retention (default 30 days or the newest 100 runs, and a 10 MB log cap) prunes
+`~/.bridge/runs` and trims `operations.log`. Override in `~/.bridge/settings.json`
+or `BRIDGE_RETENTION_DAYS` / `BRIDGE_RETENTION_MAX_RUNS` /
+`BRIDGE_RETENTION_MAX_LOG_BYTES`.
 
 Each `bridge patch` run additionally writes:
 
@@ -617,6 +656,18 @@ bridge report --latest
 
 ## Daily scheduler prototype
 
+Two side-by-side options — details and tradeoffs in `docs/scheduling.md`:
+
+1. **`bridge schedule install` / `bridge schedule run`** — the CLI writes and
+   runs the unit. Supports two repos at once (`--concurrency 2`).
+2. **`scripts/bridge-daily.sh`** — lockfile-guarded Bash wrapper plus example
+   launchd/cron files. One process per repo; start two shells to run two repos.
+
+Both skip before-scripts by default. Both write
+`~/.bridge/schedule/LATEST.md` (sample: `docs/daily-summary.sample.md`). Optional
+local notify: `--notify` or `BRIDGE_NOTIFY_COMMAND` (macOS `osascript` if unset
+on Darwin). No external services.
+
 `scripts/bridge-daily.sh` is a lockfile-guarded wrapper: fetch/pull (or clone) a target repo, run `bridge patch` with the after-script suite, copy **this run's** `bridge-summary.md` to a dated folder. No daemon, no cloud scheduler, no extra npm dependencies. It exits `2` if another run holds the lock, `3` on usage errors, and Bridge's own non-zero status on a failed patch. It never force-pushes a PR; the normal gates still apply.
 
 The wrapper defaults to `--skip-before-scripts` so an unattended daily run matches the temporary "strip before-scripts" path. Pass `--run-before-scripts` to keep the configured before-script list.
@@ -639,7 +690,17 @@ scripts/bridge-daily.sh --repo /Users/connormccoy/CODE/travelpass.com --run-befo
 scripts/bridge-daily.sh --repo /path/to/repo --dry-run --config /path/to/bridge.config.json
 ```
 
-Dated copies land in `~/.bridge/schedule/summaries/<repo>/<UTC-timestamp>/` and include `run-id.txt` for the captured run.
+Dated copies land in `~/.bridge/schedule/summaries/<repo>/<UTC-timestamp>/` and include `run-id.txt` for the captured run. The rolled-up daily digest is always at `~/.bridge/schedule/LATEST.md`.
+
+To run two repos at once without the CLI:
+
+```bash
+scripts/bridge-daily.sh --repo /path/to/app-a --dry-run &
+scripts/bridge-daily.sh --repo /path/to/app-b --dry-run &
+wait
+```
+
+Or: `bridge schedule run --repo /path/to/app-a --repo /path/to/app-b --concurrency 2 --dry-run`.
 
 ### macOS launchd (primary)
 

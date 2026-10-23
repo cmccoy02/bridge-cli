@@ -1,0 +1,413 @@
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+
+import { getDailyWrapperPath, getBridgeCliPath, runScheduledRepos } from '../core/batchRunner.js';
+import { getBridgeHome } from '../core/bridgeHome.js';
+import { loadBridgeSettings } from '../core/bridgeSettings.js';
+import { getLatestSummaryPath, rebuildDailySummary } from '../core/dailySummary.js';
+import { notifyDailySummary } from '../core/notifyLocal.js';
+import { error, info, line, success, warn } from '../ui/logger.js';
+
+const LAUNCHD_LABEL = 'com.bridge.daily';
+
+function packageRoot() {
+  return path.resolve(path.dirname(getBridgeCliPath()), '..');
+}
+
+function launchdPlistPath(home = os.homedir()) {
+  return path.join(home, 'Library', 'LaunchAgents', `${LAUNCHD_LABEL}.plist`);
+}
+
+function crontabSnippetPath(bridgeHome = getBridgeHome()) {
+  return path.join(bridgeHome, 'schedule', 'crontab.bridge');
+}
+
+function scriptBatchPath(bridgeHome = getBridgeHome()) {
+  return path.join(bridgeHome, 'schedule', 'run-batch.sh');
+}
+
+function xmlEscape(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function parseClock(value = '07:30') {
+  const match = String(value).trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) {
+    return { hour: 7, minute: 30 };
+  }
+
+  return {
+    hour: Math.min(23, Number(match[1])),
+    minute: Math.min(59, Number(match[2]))
+  };
+}
+
+function collectRepos(options = {}) {
+  const repos = [];
+  const values = Array.isArray(options.repo) ? options.repo : options.repo ? [options.repo] : [];
+
+  for (const repo of values) {
+    repos.push({
+      repo,
+      branch: options.branch || '',
+      config: options.config || ''
+    });
+  }
+
+  return repos;
+}
+
+export function renderLaunchdPlist({
+  runner = 'cli',
+  repos = [],
+  branch = 'main',
+  configPath = '',
+  time = '07:30',
+  home = os.homedir(),
+  nodePath = process.execPath,
+  cliPath = getBridgeCliPath(),
+  wrapperPath = getDailyWrapperPath(),
+  batchScriptPath = ''
+} = {}) {
+  const clock = parseClock(time);
+  const args = [];
+
+  if (runner === 'script' && repos.length === 1) {
+    args.push('/bin/bash', wrapperPath, '--repo', repos[0].repo);
+    if (branch) {
+      args.push('--branch', branch);
+    }
+    if (configPath) {
+      args.push('--config', configPath);
+    }
+  } else if (runner === 'script' && batchScriptPath) {
+    args.push('/bin/bash', batchScriptPath);
+  } else {
+    args.push(nodePath, cliPath, 'schedule', 'run');
+    for (const item of repos) {
+      args.push('--repo', item.repo);
+    }
+    if (branch) {
+      args.push('--branch', branch);
+    }
+    if (configPath) {
+      args.push('--config', configPath);
+    }
+  }
+
+  const programArguments = args
+    .map((arg) => `    <string>${xmlEscape(arg)}</string>`)
+    .join('\n');
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${LAUNCHD_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+${programArguments}
+  </array>
+  <key>WorkingDirectory</key>
+  <string>${xmlEscape(packageRoot())}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+    <key>BRIDGE_HOME</key>
+    <string>${xmlEscape(path.join(home, '.bridge'))}</string>
+  </dict>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>${clock.hour}</integer>
+    <key>Minute</key>
+    <integer>${clock.minute}</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>${xmlEscape(path.join(home, '.bridge', 'schedule', 'logs', 'daily.out.log'))}</string>
+  <key>StandardErrorPath</key>
+  <string>${xmlEscape(path.join(home, '.bridge', 'schedule', 'logs', 'daily.err.log'))}</string>
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>
+`;
+}
+
+export function renderCrontab({
+  runner = 'cli',
+  repos = [],
+  branch = 'main',
+  configPath = '',
+  time = '07:30',
+  nodePath = process.execPath,
+  cliPath = getBridgeCliPath(),
+  wrapperPath = getDailyWrapperPath(),
+  batchScriptPath = ''
+} = {}) {
+  const clock = parseClock(time);
+  const nodeDir = path.dirname(nodePath);
+  let command = '';
+
+  if (runner === 'script' && repos.length === 1) {
+    command = `/bin/bash ${wrapperPath} --repo ${repos[0].repo}` +
+      (branch ? ` --branch ${branch}` : '') +
+      (configPath ? ` --config ${configPath}` : '');
+  } else if (runner === 'script' && batchScriptPath) {
+    command = `/bin/bash ${batchScriptPath}`;
+  } else {
+    const repoFlags = repos.map((item) => `--repo ${item.repo}`).join(' ');
+    command = `${nodePath} ${cliPath} schedule run ${repoFlags}` +
+      (branch ? ` --branch ${branch}` : '') +
+      (configPath ? ` --config ${configPath}` : '');
+  }
+
+  return `# Bridge daily schedule (generated by \`bridge schedule install\`)
+SHELL=/bin/bash
+PATH=${nodeDir}:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin
+BRIDGE_HOME=$HOME/.bridge
+
+${clock.minute} ${clock.hour} * * * ${command} >> $HOME/.bridge/schedule/logs/daily.log 2>&1
+`;
+}
+
+export function renderBatchScript({
+  repos = [],
+  branch = 'main',
+  configPath = '',
+  wrapperPath = getDailyWrapperPath()
+} = {}) {
+  const lines = [
+    '#!/usr/bin/env bash',
+    'set -euo pipefail',
+    `wrapper=${JSON.stringify(wrapperPath)}`,
+    ''
+  ];
+
+  for (const item of repos) {
+    const args = [`--repo ${JSON.stringify(item.repo)}`];
+    if (branch) {
+      args.push(`--branch ${JSON.stringify(branch)}`);
+    }
+    if (configPath) {
+      args.push(`--config ${JSON.stringify(configPath)}`);
+    }
+    lines.push(`/bin/bash "$wrapper" ${args.join(' ')} &`);
+  }
+
+  lines.push('wait', '');
+  return lines.join('\n');
+}
+
+async function writeScheduleFiles(options) {
+  const runner = options.runner === 'script' ? 'script' : 'cli';
+  const repos = collectRepos(options);
+  const bridgeHome = getBridgeHome();
+  const batchPath = scriptBatchPath(bridgeHome);
+  const needsBatch = runner === 'script' && repos.length > 1;
+  const rendered = {
+    launchd: renderLaunchdPlist({
+      ...options,
+      runner,
+      repos,
+      configPath: options.config || '',
+      batchScriptPath: needsBatch ? batchPath : ''
+    }),
+    crontab: renderCrontab({
+      ...options,
+      runner,
+      repos,
+      configPath: options.config || '',
+      batchScriptPath: needsBatch ? batchPath : ''
+    }),
+    batchScript: needsBatch
+      ? renderBatchScript({
+          repos,
+          branch: options.branch || 'main',
+          configPath: options.config || ''
+        })
+      : ''
+  };
+
+  return { runner, repos, bridgeHome, batchPath, rendered, needsBatch };
+}
+
+export async function scheduleInstallCommand(options = {}) {
+  const repos = collectRepos(options);
+
+  if (repos.length === 0) {
+    error('bridge schedule install requires at least one --repo');
+    return false;
+  }
+
+  const { runner, bridgeHome, batchPath, rendered, needsBatch } = await writeScheduleFiles(options);
+
+  if (options.print) {
+    line(options.platform === 'linux' || process.platform !== 'darwin' ? rendered.crontab : rendered.launchd);
+    if (needsBatch) {
+      line('');
+      line('# Companion batch script');
+      line(rendered.batchScript);
+    }
+    return true;
+  }
+
+  await fs.mkdir(path.join(bridgeHome, 'schedule', 'logs'), { recursive: true });
+
+  if (needsBatch) {
+    await fs.writeFile(batchPath, rendered.batchScript, { mode: 0o755 });
+    info(`Wrote ${batchPath}`);
+  }
+
+  if (options.platform === 'linux' || (options.cron && !options.launchd) || process.platform !== 'darwin') {
+    const crontabPath = crontabSnippetPath(bridgeHome);
+    await fs.writeFile(crontabPath, rendered.crontab, 'utf8');
+    success(`Wrote cron snippet: ${crontabPath}`);
+    info('Install with: crontab -e  (paste the snippet). This does not replace your existing crontab.');
+    return true;
+  }
+
+  const plistPath = launchdPlistPath();
+  await fs.mkdir(path.dirname(plistPath), { recursive: true });
+  await fs.writeFile(plistPath, rendered.launchd, 'utf8');
+  success(`Wrote LaunchAgent: ${plistPath}`);
+  info('Load with:');
+  line(`  launchctl bootstrap gui/$(id -u) ${plistPath}`);
+  line(`  launchctl enable gui/$(id -u)/${LAUNCHD_LABEL}`);
+  info(`Runner: ${runner}. Scheduled runs keep --skip-before-scripts on.`);
+  return true;
+}
+
+export async function scheduleUninstallCommand(options = {}) {
+  const plistPath = launchdPlistPath();
+  const crontabPath = crontabSnippetPath();
+  let removed = 0;
+
+  try {
+    await fs.rm(plistPath, { force: true });
+    info(`Removed ${plistPath}`);
+    removed += 1;
+  } catch {
+    // optional
+  }
+
+  try {
+    await fs.rm(crontabPath, { force: true });
+    info(`Removed ${crontabPath}`);
+    removed += 1;
+  } catch {
+    // optional
+  }
+
+  if (options.unload && process.platform === 'darwin') {
+    info(`If loaded: launchctl bootout gui/$(id -u)/${LAUNCHD_LABEL}`);
+  }
+
+  if (removed === 0) {
+    warn('No installed Bridge schedule files found.');
+    return true;
+  }
+
+  return true;
+}
+
+export async function scheduleStatusCommand() {
+  const plistPath = launchdPlistPath();
+  const crontabPath = crontabSnippetPath();
+  const latestPath = getLatestSummaryPath();
+
+  for (const filePath of [plistPath, crontabPath, latestPath]) {
+    try {
+      await fs.access(filePath);
+      line(`present  ${filePath}`);
+    } catch {
+      line(`missing  ${filePath}`);
+    }
+  }
+
+  return true;
+}
+
+export async function scheduleLatestCommand({ json = false, notify = false } = {}) {
+  const latestPath = getLatestSummaryPath();
+
+  try {
+    const text = await fs.readFile(latestPath, 'utf8');
+    if (json) {
+      line(JSON.stringify({ path: latestPath, text }, null, 2));
+    } else {
+      info(`Latest summary: ${latestPath}`);
+      line(text.trimEnd());
+    }
+
+    if (notify) {
+      await notifyDailySummary({
+        summaryText: text,
+        summaryPath: latestPath,
+        enabled: true
+      });
+    }
+
+    return true;
+  } catch (readError) {
+    if (readError?.code === 'ENOENT') {
+      const rebuilt = await rebuildDailySummary();
+      if (!rebuilt.text.includes('No Bridge runs')) {
+        line(rebuilt.text.trimEnd());
+        return true;
+      }
+      warn(`No daily summary yet. Expected at ${latestPath}`);
+      return false;
+    }
+
+    error(readError.message);
+    return false;
+  }
+}
+
+export async function scheduleRunCommand(options = {}) {
+  const repos = collectRepos(options);
+
+  if (repos.length === 0) {
+    error('bridge schedule run requires at least one --repo');
+    return false;
+  }
+
+  const settings = await loadBridgeSettings();
+  const concurrency = Number(options.concurrency) || settings.concurrency || 2;
+  const skipBeforeScripts = options.runBeforeScripts ? false : true;
+  const result = await runScheduledRepos({
+    repos,
+    concurrency,
+    dryRun: options.dryRun === true,
+    skipBeforeScripts,
+    notify: options.notify === true,
+    notifyCommand: options.notifyCommand || '',
+    extraArgs: options.extraArgs
+  });
+
+  line();
+  info(`Batch ${result.batchId}`);
+  info(
+    `Concurrency ${concurrency}  wall ${result.performance.wallMs}ms  peak RSS ${result.performance.peakRssBytes} bytes`
+  );
+  info(`Daily summary: ${result.daily.latestPath}`);
+  line();
+  line(result.daily.text.trimEnd());
+
+  if (!result.ok) {
+    error('One or more scheduled repo runs failed.');
+    return false;
+  }
+
+  return true;
+}
+
+export { LAUNCHD_LABEL };
