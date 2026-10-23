@@ -140,6 +140,14 @@ async function readLatestSummary(bridgeHome) {
   };
 }
 
+test('wrapper help keeps skip-before-scripts on by default', async (t) => {
+  const cwd = await makeTempDir(t);
+  const result = await runWrapper('--help', { cwd, env: { BRIDGE_HOME: cwd } });
+  assert.equal(result.code, 0);
+  assert.match(result.stdout, /--skip-before-scripts.*default: on/i);
+  assert.match(result.stdout, /--notify/);
+});
+
 test('wrapper prints usage and exits 3 without --repo', async (t) => {
   const cwd = await makeTempDir(t);
   const result = await runWrapper('', { cwd, env: { BRIDGE_HOME: cwd } });

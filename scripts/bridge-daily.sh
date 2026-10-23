@@ -33,6 +33,8 @@
 #   --skip-before-scripts Pass --skip-before-scripts to Bridge (default: on).
 #   --run-before-scripts  Do not pass --skip-before-scripts.
 #   --dry-run             Pass --dry-run to Bridge (no commit/push/PR).
+#   --notify              After the run, fire the local notification hook
+#                         (BRIDGE_NOTIFY_COMMAND, or osascript on macOS).
 #   --                    Extra arguments forwarded to `bridge patch`.
 #
 # Environment:
@@ -50,7 +52,7 @@
 set -euo pipefail
 
 usage() {
-  sed -n '2,48p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,52p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 is_git_checkout() {
@@ -325,6 +327,7 @@ config_path="${BRIDGE_DAILY_CONFIG:-}"
 bridge_bin="${BRIDGE_BIN:-}"
 skip_before_scripts=1
 dry_run=0
+notify=0
 extra_args=()
 source_repo=""
 
@@ -364,6 +367,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --dry-run)
       dry_run=1
+      shift
+      ;;
+    --notify)
+      notify=1
+      shift
+      ;;
+    --no-notify)
+      notify=0
       shift
       ;;
     --help|-h)
@@ -509,6 +520,27 @@ if [[ -n "$run_dir" && -f "$run_dir/bridge-summary.md" ]]; then
   echo "Saved summary: $dest/bridge-summary.md"
 else
   echo "warning: no bridge-summary.md for this run under $bridge_home/runs" >&2
+fi
+
+latest_summary="$bridge_home/schedule/LATEST.md"
+if [[ -f "$latest_summary" ]]; then
+  echo "Daily summary: $latest_summary"
+fi
+
+if [[ "$notify" -eq 1 || "${BRIDGE_NOTIFY:-}" == "1" || -n "${BRIDGE_NOTIFY_COMMAND:-}" ]]; then
+  notify_body="Bridge daily run finished"
+  if [[ -n "$run_id" ]]; then
+    notify_body="Bridge $repo_name ($run_id) finished"
+  fi
+  if [[ -n "${BRIDGE_NOTIFY_COMMAND:-}" ]]; then
+    BRIDGE_SUMMARY_PATH="$latest_summary" \
+      BRIDGE_NOTIFY_TITLE="Bridge" \
+      BRIDGE_NOTIFY_BODY="$notify_body" \
+      BRIDGE_SUMMARY_TEXT="$(cat "$latest_summary" 2>/dev/null || true)" \
+      eval "$BRIDGE_NOTIFY_COMMAND" || true
+  elif command -v osascript >/dev/null 2>&1; then
+    osascript -e "display notification \"$notify_body\" with title \"Bridge\"" || true
+  fi
 fi
 
 if [[ "$bridge_status" -ne 0 ]]; then

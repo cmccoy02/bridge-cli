@@ -89,6 +89,10 @@ test('saved run reports retain useful evidence and redact command output', async
 
   assert.equal(report.schemaVersion, 'bridge-report.v1');
   assert.equal(report.run.status, 'failed');
+  assert.equal(report.timeSaved.schemaVersion, 'bridge-time-saved.v1');
+  assert.equal(report.timeSaved.packagesUpdated, 1);
+  assert.equal(report.timeSaved.outcome, 'failed');
+  assert.ok(report.performance);
   assert.equal(report.phases.length, 4);
   assert.equal(report.outcome.dependencySummary.totalChanged, 1);
   assert.equal(report.outcome.audits[0].comparison.delta.total, -1);

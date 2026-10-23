@@ -1,5 +1,4 @@
 import fs from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 
 import { DEFAULT_BRANCH_PREFIX, PACKAGE_MANAGER_PRESETS, CONFIG_CANDIDATES } from '../constants.js';
@@ -17,9 +16,15 @@ import {
   logPhase,
   logRunEnd,
   logRunFailure,
+  logRunSignal,
   logRunStart,
   makeRunContext
 } from '../core/activityLogger.js';
+import { rebuildDailySummary } from '../core/dailySummary.js';
+import { LockBusyError } from '../core/fileLock.js';
+import { startPerfSampler } from '../core/perfSampler.js';
+import { applyRetention } from '../core/retention.js';
+import { acquirePatchLock, resolvePatchLockKey } from '../core/runLock.js';
 import {
   AgentEventStream,
   computeFileSha256,
@@ -109,6 +114,7 @@ import {
   runPythonRequirementsWildcardUpdate
 } from '../core/pythonRequirementsUpdater.js';
 import {
+  createIsolatedWorkspace,
   exitCodeForSignal,
   installRunSignalHandlers,
   removeWorkspace,
@@ -151,15 +157,6 @@ function getDateStamp(date = new Date()) {
   const minutes = String(date.getMinutes()).padStart(2, '0');
   // Include time component to distinguish same-day morning/evening runs
   return `${year}-${month}-${day}-${hours}${minutes}`;
-}
-
-function sanitizeSegment(value) {
-  const normalized = String(value || 'repo')
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-
-  return normalized || 'repo';
 }
 
 function formatDuration(ms) {
@@ -1547,7 +1544,39 @@ export async function patchCommand({
 
   const repoName = config.name || path.basename(cwd);
   run.repo = repoName;
-  const tempDir = path.join(os.tmpdir(), `bridge-${sanitizeSegment(repoName)}-${Date.now()}`);
+  const perfSampler = startPerfSampler();
+  let performance = null;
+  let runtimeLocalPackages = [];
+
+  try {
+    runtimeLocalPackages = parseLocalPackageArguments(localPackageArguments, cwd);
+  } catch (localPackageError) {
+    error(localPackageError.message);
+    await logRunFailure(run, localPackageError);
+    await logRunEnd(run, 'failed_preflight');
+    return false;
+  }
+
+  let patchLock = { async release() {} };
+  const portableOriginUrl = resolvePortableOriginUrl(cwd, await getOriginUrl(cwd));
+  try {
+    patchLock = await acquirePatchLock(
+      resolvePatchLockKey({ cwd, repoName, originUrl: portableOriginUrl })
+    );
+  } catch (lockError) {
+    if (lockError instanceof LockBusyError) {
+      error(
+        `Another Bridge run already holds the patch lock for ${repoName}. Wait for it to finish or use a different repo.`
+      );
+      await logRunFailure(run, lockError);
+      await logRunEnd(run, 'failed_preflight', { lockBusy: true });
+      return false;
+    }
+
+    throw lockError;
+  }
+
+  const tempDir = await createIsolatedWorkspace(repoName);
   try {
     await sweepStaleBridgeWorkspaces();
   } catch {
@@ -1561,17 +1590,6 @@ export async function patchCommand({
   const bundleResults = [];
   const validationResults = [];
   const dependencyDeltas = [];
-  const portableOriginUrl = resolvePortableOriginUrl(cwd, await getOriginUrl(cwd));
-  let runtimeLocalPackages = [];
-
-  try {
-    runtimeLocalPackages = parseLocalPackageArguments(localPackageArguments, cwd);
-  } catch (localPackageError) {
-    error(localPackageError.message);
-    await logRunFailure(run, localPackageError);
-    await logRunEnd(run, 'failed_preflight');
-    return false;
-  }
 
   let branchName = '';
   let compareUrl = '';
@@ -1653,7 +1671,8 @@ export async function patchCommand({
         skippedCount,
         blockedCount,
         environment: runtimeEnvironment,
-        skipBeforeScripts: config?.skipBeforeScripts === true
+        skipBeforeScripts: config?.skipBeforeScripts === true,
+        performance: perfSampler.snapshot()
       });
       runReportPath = savedReport.reportPath;
       warn(`Run cancelled (${signal}). Partial report: ${runReportPath}`);
@@ -1666,6 +1685,12 @@ export async function patchCommand({
       info(`Cleaned isolated workspace: ${tempDir}`);
     } catch (cleanupError) {
       warn(`Failed to delete temp directory: ${cleanupError.message}`);
+    }
+
+    try {
+      await patchLock.release();
+    } catch {
+      // Lock release is best-effort on cancel.
     }
 
     process.exit(exitCodeForSignal(signal));
@@ -2195,6 +2220,7 @@ export async function patchCommand({
     await logRunEnd(run, 'failed', { branchName, earlyExit });
     return false;
   } finally {
+    performance = perfSampler.stop();
     uninstallSignals();
 
     if (failure) {
@@ -2247,11 +2273,34 @@ export async function patchCommand({
         skippedCount,
         blockedCount,
         environment: runtimeEnvironment,
-        skipBeforeScripts: config?.skipBeforeScripts === true
+        skipBeforeScripts: config?.skipBeforeScripts === true,
+        performance
       });
       runReportPath = savedReport.reportPath;
+
+      if (savedReport.report?.timeSaved) {
+        await logRunSignal(run, savedReport.report.timeSaved);
+      }
+
+      try {
+        await rebuildDailySummary();
+      } catch {
+        // Digest write is best-effort and must not fail the run.
+      }
     } catch (reportError) {
       warn(`Could not save detailed Bridge report: ${reportError.message}`);
+    }
+
+    try {
+      await applyRetention({ keepRunIds: [run.runId] });
+    } catch {
+      // Retention is best-effort.
+    }
+
+    try {
+      await patchLock.release();
+    } catch {
+      // Lock release is best-effort.
     }
 
     if (keepWorkspace) {

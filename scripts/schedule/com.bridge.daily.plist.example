@@ -9,8 +9,12 @@
   4. launchctl enable gui/$(id -u)/com.bridge.daily
   5. launchctl kickstart -k gui/$(id -u)/com.bridge.daily   # optional immediate run
 
-  The wrapper refuses overlapping runs and exits non-zero on failure. It does
-  not force a PR; Bridge still applies its normal gates.
+  The wrapper refuses overlapping runs of the same repo and exits non-zero on
+  failure. It does not force a PR; Bridge still applies its normal gates.
+
+  Alternative: `bridge schedule install --runner cli` writes a unit that calls
+  `bridge schedule run` (multi-repo, daily digest, optional --notify). See
+  docs/scheduling.md. This example is the modular runner approach.
 -->
 <plist version="1.0">
 <dict>

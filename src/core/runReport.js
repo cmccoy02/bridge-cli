@@ -1,9 +1,10 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
-import { getActivityLogPath, getBridgeHome } from './activityLogger.js';
+import { getActivityLogPath, getBridgeHome, getRunOperationsLogPath } from './activityLogger.js';
 import { AGENT_TELEMETRY_SCHEMA_VERSION, getAgentEventStreamPath } from './agentTelemetry.js';
 import { redactActivityPayload, redactSensitiveText } from './redaction.js';
+import { buildRunSignal } from './runSignal.js';
 import { formatValidationGateReason } from './scriptDiff.js';
 import {
   buildScriptSummary,
@@ -22,13 +23,24 @@ function parseLogLine(line) {
   }
 }
 
+async function readJsonl(filePath) {
+  const log = await fs.readFile(filePath, 'utf8');
+  return log.split(/\r?\n/).map(parseLogLine).filter(Boolean);
+}
+
 async function readRunEvents(runId) {
   try {
-    const log = await fs.readFile(getActivityLogPath(), 'utf8');
-    return log
-      .split(/\r?\n/)
-      .map(parseLogLine)
-      .filter((event) => event?.runId === runId);
+    return (await readJsonl(getRunOperationsLogPath(runId))).filter(
+      (event) => event?.runId === runId
+    );
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      throw error;
+    }
+  }
+
+  try {
+    return (await readJsonl(getActivityLogPath())).filter((event) => event?.runId === runId);
   } catch (error) {
     if (error?.code === 'ENOENT') {
       return [];
@@ -522,7 +534,8 @@ export async function writeRunReport({
   blockedCount = 0,
   environment = null,
   scriptSummary = null,
-  skipBeforeScripts = false
+  skipBeforeScripts = false,
+  performance = null
 } = {}) {
   const events = await readRunEvents(run.runId);
   const finishedEvent = [...events].reverse().find((event) => event.event === 'run_finished');
@@ -548,6 +561,20 @@ export async function writeRunReport({
 
   const agentEventStreamPath = getAgentEventStreamPath(run.runId);
   const resolvedEnvironment = environment || getEnvironmentInfo();
+  const resolvedDurationMs = Date.now() - run.startedAtMs;
+  const resolvedPerformance = performance
+    ? { ...performance, durationMs: performance.durationMs || resolvedDurationMs }
+    : { durationMs: resolvedDurationMs };
+  const timeSaved = buildRunSignal({
+    run: { ...run, durationMs: resolvedDurationMs },
+    status,
+    repo,
+    dependencySummary: resolvedDependencySummary,
+    scriptSummary: resolvedScriptSummary,
+    pullRequest,
+    performance: resolvedPerformance,
+    durationMs: resolvedDurationMs
+  });
 
   const report = redactActivityPayload({
     schemaVersion: RUN_REPORT_SCHEMA_VERSION,
@@ -559,7 +586,8 @@ export async function writeRunReport({
       status,
       startedAt: new Date(run.startedAtMs).toISOString(),
       finishedAt: finishedEvent?.at || new Date().toISOString(),
-      durationMs: Date.now() - run.startedAtMs
+      durationMs: resolvedDurationMs,
+      pid: run.pid || process.pid
     },
     environment: resolvedEnvironment,
     target: {
@@ -605,6 +633,8 @@ export async function writeRunReport({
       skippedCount: skippedCount || 0,
       blockedCount: resolvedBlockedCount
     },
+    performance: resolvedPerformance,
+    timeSaved,
     phaseTiming: phaseTiming || {},
     phases: events
       .filter((event) => event.event === 'phase')
