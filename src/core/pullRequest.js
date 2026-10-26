@@ -347,6 +347,25 @@ export function decidePullRequestReuse({
   return { action: 'update', reason: '' };
 }
 
+// Both shapes keep status 'existing'; `reused` is what tells classifyPrAction
+// (runSignal.js) that nothing was pushed, versus new content on the open PR.
+export function reusedPullRequestResult(url) {
+  return {
+    status: 'existing',
+    reused: true,
+    url,
+    message: `Reusing open Bridge pull request with identical changes: ${url}`
+  };
+}
+
+export function updatedPullRequestResult(url) {
+  return {
+    status: 'existing',
+    url,
+    message: `Updated existing Bridge pull request: ${url}`
+  };
+}
+
 export function formatDuplicatePullRequestNotice(duplicates = []) {
   const list = Array.isArray(duplicates) ? duplicates.filter((entry) => entry?.number) : [];
 

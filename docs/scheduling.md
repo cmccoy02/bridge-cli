@@ -91,10 +91,20 @@ CPU user/sys). A `bridge schedule run` batch also prints wall vs sum-of-runs.
 
 ## Daily summary and notifications
 
-Every patch rebuilds `~/.bridge/schedule/LATEST.md` (and
-`~/.bridge/schedule/summaries/daily/YYYY-MM-DD.md`). That is the file to look
-at after an unattended run. GitHub will not notify on private/internal Bridge
-PRs; this file plus an optional local hook is the signal.
+Every patch rebuilds `~/.bridge/schedule/LATEST.md` and
+`~/.bridge/schedule/summaries/daily/YYYY-MM-DD.md`. `LATEST.md` is the file to
+look at after an unattended run. GitHub will not notify on private/internal
+Bridge PRs; this file plus an optional local hook is the signal.
+
+- `LATEST.md` covers the **latest batch** only: every run of the most recent
+  `bridge schedule run` (grouped by the batch id it exports as
+  `BRIDGE_BATCH_ID`, recorded as `run.batchId` in each report), or the latest
+  run alone when it was started outside a batch. Running the scheduler twice in
+  one day does not add the two batches together.
+- `summaries/daily/YYYY-MM-DD.md` is the archive of every run that UTC day.
+- Notifications fire once per batch from `bridge schedule run`. A standalone
+  `scripts/bridge-daily.sh` run notifies for itself; inside a batch it stays
+  quiet so you do not get one message per repo plus one for the batch.
 
 ```bash
 # macOS notification, or any command:

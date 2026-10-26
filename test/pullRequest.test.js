@@ -17,8 +17,24 @@ import {
   makePullRequestScopeKey,
   parseBridgePrMarker,
   PullRequestLookupError,
+  reusedPullRequestResult,
+  updatedPullRequestResult,
   updatePullRequest
 } from '../src/core/pullRequest.js';
+import { buildRunSignal, classifyPrAction } from '../src/core/runSignal.js';
+
+test('an identical reuse reports prAction reused; a refreshed PR reports updated', () => {
+  const url = 'https://github.com/example/app/pull/16';
+  const reused = reusedPullRequestResult(url);
+  const updated = updatedPullRequestResult(url);
+
+  assert.equal(reused.status, 'existing');
+  assert.equal(updated.status, 'existing');
+  assert.equal(classifyPrAction(reused), 'reused');
+  assert.equal(classifyPrAction(updated), 'updated');
+  assert.equal(buildRunSignal({ pullRequest: reused }).prAction, 'reused');
+  assert.equal(buildRunSignal({ pullRequest: updated }).prAction, 'updated');
+});
 
 function prViewCommits(commits = []) {
   return {

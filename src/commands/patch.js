@@ -97,6 +97,8 @@ import {
   formatDuplicatePullRequestNotice,
   makePullRequestScopeKey,
   PullRequestLookupError,
+  reusedPullRequestResult,
+  updatedPullRequestResult,
   updatePullRequest
 } from '../core/pullRequest.js';
 import {
@@ -1954,11 +1956,7 @@ export async function patchCommand({
 
     if (reusablePullRequest?.reuseAction === 'reuse_identical') {
       branchName = reusablePullRequest.headRefName;
-      pullRequest = {
-        status: 'existing',
-        url: reusablePullRequest.url,
-        message: `Reusing open Bridge pull request with identical changes: ${reusablePullRequest.url}`
-      };
+      pullRequest = reusedPullRequestResult(reusablePullRequest.url);
       compareUrl = getCompareUrl(originUrl || config.repoUrl, branchName);
       success(pullRequest.message);
       status = 'pushed';
@@ -2075,11 +2073,7 @@ export async function patchCommand({
       });
 
       if (edited.status === 'updated') {
-        pullRequest = {
-          status: 'existing',
-          url: reusablePullRequest.url,
-          message: `Updated existing Bridge pull request: ${reusablePullRequest.url}`
-        };
+        pullRequest = updatedPullRequestResult(reusablePullRequest.url);
       } else {
         pullRequest = {
           status: 'body_update_failed',

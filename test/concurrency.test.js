@@ -252,6 +252,79 @@ test('two daily wrappers for different repos run concurrently', async (t) => {
   assert.equal(locks.filter((name) => name.endsWith('.lock')).length, 0);
 });
 
+test('a scheduled batch notifies once and LATEST.md does not grow across batches', async (t) => {
+  const first = await createOriginRepo(t, 'gamma');
+  const second = await createOriginRepo(t, 'delta');
+  const bridgeHome = path.join(first.root, 'bridge-home');
+  const binDir = path.join(first.root, 'bin');
+  await fs.mkdir(binDir, { recursive: true });
+  const fakeBridge = await writeFakeBridge(binDir);
+  const notifyLog = path.join(first.root, 'notify.log');
+
+  const env = {
+    ...gitEnv,
+    BRIDGE_HOME: bridgeHome,
+    PATH: `${binDir}:${process.env.PATH}`,
+    BRIDGE_BIN: fakeBridge,
+    BRIDGE_NOTIFY_COMMAND: `echo notified >> ${quote(notifyLog)}`
+  };
+  const runBatch = () =>
+    runScheduledRepos({
+      repos: [{ repo: first.originDir }, { repo: second.originDir }],
+      concurrency: 2,
+      dryRun: true,
+      skipBeforeScripts: true,
+      env,
+      cwd: first.root,
+      wrapperPath,
+      bridgeHome
+    });
+
+  const firstBatch = await runBatch();
+  assert.equal(firstBatch.ok, true, JSON.stringify(firstBatch.results, null, 2));
+  assert.equal(firstBatch.notification.sent, true);
+  const notified = (await fs.readFile(notifyLog, 'utf8')).trim().split(/\n/);
+  assert.equal(notified.length, 1, 'one notification per batch, not one per repo plus the batch');
+
+  const secondBatch = await runBatch();
+  assert.equal(secondBatch.ok, true, JSON.stringify(secondBatch.results, null, 2));
+  const latest = await fs.readFile(path.join(bridgeHome, 'schedule', 'LATEST.md'), 'utf8');
+  assert.match(latest, new RegExp(`Batch: ${secondBatch.batchId}`));
+  assert.match(latest, /Packages updated: 2\n/);
+  assert.equal(secondBatch.daily.model.repos.length, 2);
+  assert.equal(secondBatch.daily.dailyModel.repos.length, 4);
+});
+
+test('a standalone daily wrapper run still sends its own notification', async (t) => {
+  const origin = await createOriginRepo(t, 'epsilon');
+  const bridgeHome = path.join(origin.root, 'bridge-home');
+  const binDir = path.join(origin.root, 'bin');
+  await fs.mkdir(binDir, { recursive: true });
+  const fakeBridge = await writeFakeBridge(binDir);
+  const notifyLog = path.join(origin.root, 'notify.log');
+  const { BRIDGE_BATCH_ID: _ignored, ...baseEnv } = gitEnv;
+
+  const result = await runCommand(
+    `/bin/bash ${quote(wrapperPath)} --repo ${quote(origin.originDir)} --dry-run`,
+    {
+      cwd: origin.root,
+      quiet: true,
+      allowFailure: true,
+      env: {
+        ...baseEnv,
+        BRIDGE_HOME: bridgeHome,
+        PATH: `${binDir}:${process.env.PATH}`,
+        BRIDGE_BIN: fakeBridge,
+        BRIDGE_NOTIFY_COMMAND: `echo notified >> ${quote(notifyLog)}`
+      }
+    }
+  );
+
+  assert.equal(result.code, 0, result.stderr);
+  const notified = (await fs.readFile(notifyLog, 'utf8')).trim().split(/\n/);
+  assert.equal(notified.length, 1);
+});
+
 test('two real bridge patch dry-runs isolate workspaces, run dirs, and logs', async (t) => {
   const first = await createOriginRepo(t, 'one');
   const second = await createOriginRepo(t, 'two');

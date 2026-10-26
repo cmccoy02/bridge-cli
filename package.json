@@ -11,6 +11,7 @@
     "bin",
     "src",
     "templates",
+    "build-info.json",
     "scripts/bridge-daily.sh",
     "scripts/schedule",
     "docs",
@@ -20,7 +21,9 @@
   "scripts": {
     "start": "node ./bin/bridge.js",
     "smoke": "node ./bin/bridge.js --help",
-    "test": "node --import ./scripts/setup-bridge-home.js --test"
+    "test": "node --import ./scripts/setup-bridge-home.js --test",
+    "prepack": "node ./scripts/write-build-info.js",
+    "postpack": "node ./scripts/write-build-info.js --clean"
   },
   "engines": {
     "node": ">=18"

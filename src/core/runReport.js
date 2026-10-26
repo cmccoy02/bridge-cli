@@ -582,6 +582,7 @@ export async function writeRunReport({
     generatedAt: new Date().toISOString(),
     run: {
       id: run.runId,
+      ...(run.batchId ? { batchId: run.batchId } : {}),
       command: run.command,
       status,
       startedAt: new Date(run.startedAtMs).toISOString(),

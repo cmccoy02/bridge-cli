@@ -214,7 +214,15 @@ async function readJsonReport(reportPath) {
   }
 }
 
-export async function listReportsForDate(dateStamp, bridgeHome = getBridgeHome()) {
+function reportStartedAt(report) {
+  return String(report.run?.startedAt || report.generatedAt || '');
+}
+
+function reportFinishedAt(report) {
+  return String(report.run?.finishedAt || report.generatedAt || report.run?.startedAt || '');
+}
+
+async function listRunReports(bridgeHome = getBridgeHome()) {
   const runsDir = path.join(bridgeHome, 'runs');
   let entries = [];
 
@@ -242,36 +250,90 @@ export async function listReportsForDate(dateStamp, bridgeHome = getBridgeHome()
       continue;
     }
 
-    const started = String(report.run.startedAt || report.generatedAt || '');
-    if (!started.startsWith(dateStamp)) {
-      continue;
-    }
-
     reports.push({ report, reportPath });
   }
 
   reports.sort((left, right) =>
-    String(left.report.run.startedAt || '').localeCompare(String(right.report.run.startedAt || ''))
+    reportStartedAt(left.report).localeCompare(reportStartedAt(right.report))
   );
 
   return reports;
+}
+
+// LATEST.md covers one batch, not the whole day. With an explicit batch, take
+// every report stamped with its id (or whose run id the batch captured, for
+// reports written without one). Otherwise follow the most recently finished
+// run: its batch if it had one, or that run alone.
+function selectLatestBatchReports(listed, { batchId = '', batchRunIds = [] } = {}) {
+  if (batchId) {
+    const runIds = new Set(batchRunIds.filter(Boolean));
+    return {
+      batchId,
+      reports: listed.filter(
+        ({ report }) => report.run.batchId === batchId || runIds.has(report.run.id)
+      )
+    };
+  }
+
+  if (listed.length === 0) {
+    return { batchId: '', reports: [] };
+  }
+
+  const latest = listed.reduce((newest, entry) =>
+    reportFinishedAt(entry.report).localeCompare(reportFinishedAt(newest.report)) >= 0
+      ? entry
+      : newest
+  );
+  const latestBatchId = latest.report.run.batchId || '';
+
+  if (!latestBatchId) {
+    return { batchId: '', reports: [latest] };
+  }
+
+  return {
+    batchId: latestBatchId,
+    reports: listed.filter(({ report }) => report.run.batchId === latestBatchId)
+  };
+}
+
+function withExtraRepos(fromReports, extraRepos) {
+  const seen = new Set(fromReports.map((entry) => entry.runId).filter(Boolean));
+  const extras = extraRepos.filter((entry) => !entry.runId || !seen.has(entry.runId));
+  return [...fromReports, ...extras];
 }
 
 export async function rebuildDailySummary({
   dateStamp = utcDateStamp(),
   bridgeHome = getBridgeHome(),
   batch = null,
+  batchRunIds = [],
   extraRepos = []
 } = {}) {
-  const listed = await listReportsForDate(dateStamp, bridgeHome);
-  const fromReports = listed.map(({ report }) => repoEntryFromReport(report));
-  const seen = new Set(fromReports.map((entry) => entry.runId).filter(Boolean));
-  const extras = extraRepos.filter((entry) => !entry.runId || !seen.has(entry.runId));
+  const allReports = await listRunReports(bridgeHome);
+  const todaysReports = allReports.filter(({ report }) =>
+    reportStartedAt(report).startsWith(dateStamp)
+  );
+  const selected = batch?.id
+    ? selectLatestBatchReports(allReports, { batchId: batch.id, batchRunIds })
+    : selectLatestBatchReports(todaysReports);
+
+  // The dated file is the archive of every run that day; LATEST.md is the latest batch.
+  const dailyModel = buildDailySummaryModel({
+    dateStamp,
+    repos: withExtraRepos(
+      todaysReports.map(({ report }) => repoEntryFromReport(report)),
+      extraRepos
+    )
+  });
   const model = buildDailySummaryModel({
     dateStamp,
-    repos: [...fromReports, ...extras],
-    batch
+    repos: withExtraRepos(
+      selected.reports.map(({ report }) => repoEntryFromReport(report)),
+      extraRepos
+    ),
+    batch: batch || (selected.batchId ? { id: selected.batchId } : null)
   });
+  const dailyText = formatDailySummary(dailyModel);
   const text = formatDailySummary(model);
   const summaryPath = getDailySummaryPath(dateStamp, bridgeHome);
   const latestPath = getLatestSummaryPath(bridgeHome);
@@ -280,7 +342,7 @@ export async function rebuildDailySummary({
   await withDirLock(lockDir, async () => {
     await fs.mkdir(path.dirname(summaryPath), { recursive: true });
     await fs.mkdir(path.dirname(latestPath), { recursive: true });
-    await fs.writeFile(summaryPath, text, 'utf8');
+    await fs.writeFile(summaryPath, dailyText, 'utf8');
     await fs.writeFile(latestPath, text, 'utf8');
     if (batch) {
       await fs.writeFile(
@@ -291,5 +353,5 @@ export async function rebuildDailySummary({
     }
   });
 
-  return { model, text, summaryPath, latestPath };
+  return { model, text, summaryPath, latestPath, dailyModel, dailyText };
 }

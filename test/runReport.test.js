@@ -283,3 +283,33 @@ test('blocked baseline failures are recorded as failed validation gates', async 
   assert.ok(report.outcome.gateDecisions.some((decision) => decision.gate === 'validation' && !decision.passed));
   assert.ok(report.outcome.blockedCount >= 1);
 });
+
+test('run reports carry the scheduler batch id only when one is set', async (t) => {
+  const bridgeHome = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-report-batch-'));
+  const previousBridgeHome = process.env.BRIDGE_HOME;
+  process.env.BRIDGE_HOME = bridgeHome;
+
+  t.after(async () => {
+    if (previousBridgeHome === undefined) {
+      delete process.env.BRIDGE_HOME;
+    } else {
+      process.env.BRIDGE_HOME = previousBridgeHome;
+    }
+    await fs.rm(bridgeHome, { recursive: true, force: true });
+  });
+
+  const batched = makeRunContext('patch', '/tmp/example-project', { BRIDGE_BATCH_ID: 'batch-123' });
+  const standalone = makeRunContext('patch', '/tmp/example-project', {});
+  assert.equal(batched.batchId, 'batch-123');
+  assert.equal('batchId' in standalone, false);
+
+  for (const run of [batched, standalone]) {
+    await logRunStart(run, { dryRun: true });
+    await logRunEnd(run, 'dry_run');
+  }
+
+  const { report: batchedReport } = await writeRunReport({ run: batched, status: 'dry_run' });
+  const { report: standaloneReport } = await writeRunReport({ run: standalone, status: 'dry_run' });
+  assert.equal(batchedReport.run.batchId, 'batch-123');
+  assert.equal('batchId' in standaloneReport.run, false);
+});
