@@ -170,6 +170,142 @@ test('rebuildDailySummary writes LATEST.md from today\'s reports', async (t) => 
   assert.equal(latest, result.text);
 });
 
+async function writeSummaryReport(bridgeHome, { id, batchId, startedAt, repo, totalChanged }) {
+  const runDir = path.join(bridgeHome, 'runs', id);
+  await fs.mkdir(runDir, { recursive: true });
+  await fs.writeFile(
+    path.join(runDir, 'bridge-report.v1.json'),
+    `${JSON.stringify({
+      run: {
+        id,
+        ...(batchId ? { batchId } : {}),
+        status: 'pushed',
+        startedAt,
+        finishedAt: startedAt,
+        durationMs: 1000
+      },
+      generatedAt: startedAt,
+      target: { repository: repo },
+      outcome: {
+        dependencySummary: { totalChanged, directChanged: totalChanged, transitiveChanged: 0 },
+        scriptSummary: { scripts: [] },
+        pullRequest: null
+      }
+    })}\n`,
+    'utf8'
+  );
+}
+
+test('LATEST.md totals only the latest batch; the dated file keeps the whole day', async (t) => {
+  const bridgeHome = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-summary-batches-'));
+  t.after(async () => {
+    await fs.rm(bridgeHome, { recursive: true, force: true });
+  });
+
+  await writeSummaryReport(bridgeHome, {
+    id: 'patch-a1',
+    batchId: 'batch-a',
+    startedAt: '2026-10-23T13:30:00.000Z',
+    repo: 'app',
+    totalChanged: 100
+  });
+  await writeSummaryReport(bridgeHome, {
+    id: 'patch-a2',
+    batchId: 'batch-a',
+    startedAt: '2026-10-23T13:30:05.000Z',
+    repo: 'api',
+    totalChanged: 20
+  });
+  await writeSummaryReport(bridgeHome, {
+    id: 'patch-b1',
+    batchId: 'batch-b',
+    startedAt: '2026-10-23T19:30:00.000Z',
+    repo: 'app',
+    totalChanged: 3
+  });
+  // A run from the second batch whose report predates batch ids (older Bridge binary).
+  await writeSummaryReport(bridgeHome, {
+    id: 'patch-b2',
+    startedAt: '2026-10-23T19:30:04.000Z',
+    repo: 'api',
+    totalChanged: 4
+  });
+
+  const first = await rebuildDailySummary({
+    dateStamp: '2026-10-23',
+    bridgeHome,
+    batch: { id: 'batch-a' }
+  });
+  assert.equal(first.model.totals.packagesUpdated, 120);
+  assert.match(first.text, /Batch: batch-a/);
+
+  const second = await rebuildDailySummary({
+    dateStamp: '2026-10-23',
+    bridgeHome,
+    batch: { id: 'batch-b' },
+    batchRunIds: ['patch-b2']
+  });
+  assert.equal(second.model.totals.packagesUpdated, 7);
+  assert.deepEqual(
+    second.model.repos.map((entry) => entry.runId),
+    ['patch-b1', 'patch-b2']
+  );
+
+  const latest = await fs.readFile(path.join(bridgeHome, 'schedule', 'LATEST.md'), 'utf8');
+  assert.equal(latest, second.text);
+  assert.match(latest, /Packages updated: 7/);
+
+  const daily = await fs.readFile(
+    path.join(bridgeHome, 'schedule', 'summaries', 'daily', '2026-10-23.md'),
+    'utf8'
+  );
+  assert.equal(daily, second.dailyText);
+  assert.match(daily, /Packages updated: 127/);
+  assert.doesNotMatch(daily, /Batch:/);
+});
+
+test('without a batch, LATEST.md follows the most recent run and its batch', async (t) => {
+  const bridgeHome = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-summary-implicit-'));
+  t.after(async () => {
+    await fs.rm(bridgeHome, { recursive: true, force: true });
+  });
+
+  await writeSummaryReport(bridgeHome, {
+    id: 'patch-a1',
+    batchId: 'batch-a',
+    startedAt: '2026-10-23T13:30:00.000Z',
+    repo: 'app',
+    totalChanged: 5
+  });
+  await writeSummaryReport(bridgeHome, {
+    id: 'patch-a2',
+    batchId: 'batch-a',
+    startedAt: '2026-10-23T13:30:05.000Z',
+    repo: 'api',
+    totalChanged: 6
+  });
+
+  const inBatch = await rebuildDailySummary({ dateStamp: '2026-10-23', bridgeHome });
+  assert.equal(inBatch.model.totals.packagesUpdated, 11);
+  assert.match(inBatch.text, /Batch: batch-a/);
+
+  await writeSummaryReport(bridgeHome, {
+    id: 'patch-manual',
+    startedAt: '2026-10-23T20:00:00.000Z',
+    repo: 'app',
+    totalChanged: 2
+  });
+
+  const standalone = await rebuildDailySummary({ dateStamp: '2026-10-23', bridgeHome });
+  assert.deepEqual(
+    standalone.model.repos.map((entry) => entry.runId),
+    ['patch-manual']
+  );
+  assert.equal(standalone.model.totals.packagesUpdated, 2);
+  assert.doesNotMatch(standalone.text, /Batch:/);
+  assert.match(standalone.dailyText, /Packages updated: 13/);
+});
+
 test('run_signal / time-saved fields include duration, packages, scripts, outcome, PR', () => {
   const signal = buildRunSignal({
     run: { runId: 'patch-1', durationMs: 900 },

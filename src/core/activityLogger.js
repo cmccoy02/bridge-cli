@@ -61,13 +61,17 @@ export async function logActivity(event, payload = {}) {
   }
 }
 
-export function makeRunContext(command, cwd) {
+export function makeRunContext(command, cwd, env = process.env) {
+  // `bridge schedule run` exports BRIDGE_BATCH_ID so LATEST.md can group a batch's runs.
+  const batchId = String(env.BRIDGE_BATCH_ID || '').trim();
+
   return {
     runId: `${command}-${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`,
     command,
     cwd,
     pid: process.pid,
-    startedAtMs: Date.now()
+    startedAtMs: Date.now(),
+    ...(batchId ? { batchId } : {})
   };
 }
 

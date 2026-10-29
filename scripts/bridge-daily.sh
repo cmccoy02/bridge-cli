@@ -35,6 +35,7 @@
 #   --dry-run             Pass --dry-run to Bridge (no commit/push/PR).
 #   --notify              After the run, fire the local notification hook
 #                         (BRIDGE_NOTIFY_COMMAND, or osascript on macOS).
+#                         Skipped inside `bridge schedule run`, which notifies once.
 #   --                    Extra arguments forwarded to `bridge patch`.
 #
 # Environment:
@@ -527,7 +528,11 @@ if [[ -f "$latest_summary" ]]; then
   echo "Daily summary: $latest_summary"
 fi
 
-if [[ "$notify" -eq 1 || "${BRIDGE_NOTIFY:-}" == "1" || -n "${BRIDGE_NOTIFY_COMMAND:-}" ]]; then
+# Inside `bridge schedule run` (BRIDGE_BATCH_ID set) the batch runner sends one
+# notification for the whole batch, so a per-repo one here would be a duplicate.
+if [[ -n "${BRIDGE_BATCH_ID:-}" ]]; then
+  :
+elif [[ "$notify" -eq 1 || "${BRIDGE_NOTIFY:-}" == "1" || -n "${BRIDGE_NOTIFY_COMMAND:-}" ]]; then
   notify_body="Bridge daily run finished"
   if [[ -n "$run_id" ]]; then
     notify_body="Bridge $repo_name ($run_id) finished"

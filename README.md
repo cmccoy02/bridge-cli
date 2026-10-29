@@ -217,8 +217,9 @@ Logs are **not** a debug console. Noisy command output lives in
 - `~/.bridge/runs/<run-id>/bridge-report.v1.json` — evidence pack. Includes
   `timeSaved` (schema `bridge-time-saved.v1`) and `performance` (wall ms, peak
   RSS, CPU user/sys).
-- `~/.bridge/schedule/LATEST.md` — today's human daily summary (also under
-  `schedule/summaries/daily/YYYY-MM-DD.md`).
+- `~/.bridge/schedule/LATEST.md` — human summary of the latest batch (or the
+  latest single run). Every run that day is archived in
+  `schedule/summaries/daily/YYYY-MM-DD.md`.
 
 Retention (default 30 days or the newest 100 runs, and a 10 MB log cap) prunes
 `~/.bridge/runs` and trims `operations.log`. Override in `~/.bridge/settings.json`
@@ -666,7 +667,8 @@ Two side-by-side options — details and tradeoffs in `docs/scheduling.md`:
 Both skip before-scripts by default. Both write
 `~/.bridge/schedule/LATEST.md` (sample: `docs/daily-summary.sample.md`). Optional
 local notify: `--notify` or `BRIDGE_NOTIFY_COMMAND` (macOS `osascript` if unset
-on Darwin). No external services.
+on Darwin). A `bridge schedule run` batch sends one notification for the whole
+batch, not one per repo. No external services.
 
 `scripts/bridge-daily.sh` is a lockfile-guarded wrapper: fetch/pull (or clone) a target repo, run `bridge patch` with the after-script suite, copy **this run's** `bridge-summary.md` to a dated folder. No daemon, no cloud scheduler, no extra npm dependencies. It exits `2` if another run holds the lock, `3` on usage errors, and Bridge's own non-zero status on a failed patch. It never force-pushes a PR; the normal gates still apply.
 
@@ -690,7 +692,7 @@ scripts/bridge-daily.sh --repo /Users/connormccoy/CODE/travelpass.com --run-befo
 scripts/bridge-daily.sh --repo /path/to/repo --dry-run --config /path/to/bridge.config.json
 ```
 
-Dated copies land in `~/.bridge/schedule/summaries/<repo>/<UTC-timestamp>/` and include `run-id.txt` for the captured run. The rolled-up daily digest is always at `~/.bridge/schedule/LATEST.md`.
+Dated copies land in `~/.bridge/schedule/summaries/<repo>/<UTC-timestamp>/` and include `run-id.txt` for the captured run. The latest batch (or single run) is always summarized at `~/.bridge/schedule/LATEST.md`.
 
 To run two repos at once without the CLI:
 

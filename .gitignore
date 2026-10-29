@@ -10,3 +10,6 @@ pnpm-debug.log*
 # Corpus artifacts and generated state (not tracked)
 corpus/artifacts/
 corpus/fixtures/.remotes/
+
+# Written by npm prepack for published packages
+build-info.json

@@ -201,6 +201,7 @@ export async function runScheduledRepos({
       dryRun,
       skipBeforeScripts
     },
+    batchRunIds: results.map((entry) => entry.runId).filter(Boolean),
     extraRepos: extraRepos.filter((entry) => !entry.runId)
   });
 
