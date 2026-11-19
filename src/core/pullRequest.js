@@ -485,7 +485,7 @@ export function buildPullRequestBody({
     lines.push('', buildBridgePrMarker(scopeMeta));
   }
 
-  return lines.join('\n');
+  return redactSensitiveText(lines.join('\n'));
 }
 
 export function normalizePullRequestDiff(diff) {

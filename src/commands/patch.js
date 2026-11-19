@@ -101,6 +101,7 @@ import {
   updatedPullRequestResult,
   updatePullRequest
 } from '../core/pullRequest.js';
+import { notifyFromReport } from '../core/notify/index.js';
 import {
   getRunReportPath,
   getRunSummaryPath,
@@ -126,6 +127,14 @@ import { printBanner } from '../ui/banner.js';
 import { command, error, info, line, success, warn } from '../ui/logger.js';
 import { createSpinner } from '../ui/spinner.js';
 import { printSummary } from '../ui/summary.js';
+
+async function emitPatchNotification({ report, reportPath, run }) {
+  try {
+    await notifyFromReport({ report, reportPath, run });
+  } catch {
+    // Notifications never change the patch exit code.
+  }
+}
 
 class PatchPolicyError extends Error {
   constructor(message, commandResult = null, extras = {}) {
@@ -1677,6 +1686,11 @@ export async function patchCommand({
         performance: perfSampler.snapshot()
       });
       runReportPath = savedReport.reportPath;
+      await emitPatchNotification({
+        report: savedReport.report,
+        reportPath: savedReport.reportPath,
+        run
+      });
       warn(`Run cancelled (${signal}). Partial report: ${runReportPath}`);
     } catch (cancelError) {
       warn(`Run cancelled (${signal}). Could not save a partial report: ${cancelError.message}`);
@@ -2225,6 +2239,7 @@ export async function patchCommand({
       }
     }
 
+    let savedReportForNotify = null;
     try {
       const finalConfigSha256 = await computeFileSha256(configPath);
       configMutated = configFileSha256 !== '' && finalConfigSha256 !== configFileSha256;
@@ -2271,6 +2286,7 @@ export async function patchCommand({
         performance
       });
       runReportPath = savedReport.reportPath;
+      savedReportForNotify = savedReport;
 
       if (savedReport.report?.timeSaved) {
         await logRunSignal(run, savedReport.report.timeSaved);
@@ -2463,5 +2479,13 @@ export async function patchCommand({
     line();
     line(formatScriptSummaryTable(compactSummary));
     info(`Summary file: ${getRunSummaryPath(run.runId)}`);
+
+    if (savedReportForNotify?.report) {
+      await emitPatchNotification({
+        report: savedReportForNotify.report,
+        reportPath: savedReportForNotify.reportPath,
+        run
+      });
+    }
   }
 }

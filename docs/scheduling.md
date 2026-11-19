@@ -102,9 +102,10 @@ Bridge PRs; this file plus an optional local hook is the signal.
   run alone when it was started outside a batch. Running the scheduler twice in
   one day does not add the two batches together.
 - `summaries/daily/YYYY-MM-DD.md` is the archive of every run that UTC day.
-- Notifications fire once per batch from `bridge schedule run`. A standalone
-  `scripts/bridge-daily.sh` run notifies for itself; inside a batch it stays
-  quiet so you do not get one message per repo plus one for the batch.
+- Notifications fire once per batch from `bridge schedule run` (local hook and
+  Slack digest). A standalone `scripts/bridge-daily.sh` run notifies for itself;
+  inside a batch it stays quiet so you do not get one message per repo plus one
+  for the batch. Slack setup: [`notifications.md`](notifications.md).
 
 ```bash
 # macOS notification, or any command:

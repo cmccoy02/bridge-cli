@@ -6,6 +6,7 @@ import { getDailyWrapperPath, getBridgeCliPath, runScheduledRepos } from '../cor
 import { getBridgeHome } from '../core/bridgeHome.js';
 import { loadBridgeSettings } from '../core/bridgeSettings.js';
 import { getLatestSummaryPath, rebuildDailySummary } from '../core/dailySummary.js';
+import { printTerminalCard } from '../core/notify/index.js';
 import { notifyDailySummary } from '../core/notifyLocal.js';
 import { error, info, line, success, warn } from '../ui/logger.js';
 
@@ -401,6 +402,9 @@ export async function scheduleRunCommand(options = {}) {
   info(`Daily summary: ${result.daily.latestPath}`);
   line();
   line(result.daily.text.trimEnd());
+  if (result.notification?.event) {
+    printTerminalCard(result.notification.event);
+  }
 
   if (!result.ok) {
     error('One or more scheduled repo runs failed.');

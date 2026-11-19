@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { rebuildDailySummary } from './dailySummary.js';
-import { notifyDailySummary } from './notifyLocal.js';
+import { notifyBatch } from './notify/index.js';
 import { startPerfSampler, summarizeBatchPerformance } from './perfSampler.js';
 
 export function getDailyWrapperPath() {
@@ -206,15 +206,17 @@ export async function runScheduledRepos({
   });
 
   let notification = { sent: false, reason: 'not_requested' };
-  if (notify || env.BRIDGE_NOTIFY || env.BRIDGE_NOTIFY_COMMAND) {
-    notification = await notifyDailySummary({
-      summaryText: daily.text,
-      summaryPath: daily.latestPath,
-      enabled: notify || undefined,
-      notifyCommand,
+  try {
+    notification = await notifyBatch({
+      daily,
+      results,
+      env,
       bridgeHome: bridgeHome || undefined,
-      env
+      notify,
+      notifyCommand
     });
+  } catch {
+    notification = { sent: false, reason: 'notify_failed' };
   }
 
   return {

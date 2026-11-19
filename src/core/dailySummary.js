@@ -4,6 +4,7 @@ import path from 'node:path';
 import { getBridgeHome } from './bridgeHome.js';
 import { withDirLock } from './fileLock.js';
 import { formatBytes } from './perfSampler.js';
+import { redactSensitiveText } from './redaction.js';
 import { classifyPrAction } from './runSignal.js';
 import { formatDurationMs } from './scriptSummary.js';
 
@@ -60,7 +61,7 @@ export function oneLineFailureReason(report = {}) {
   );
 
   if (failure?.message) {
-    return String(failure.message).split('\n')[0].trim();
+    return redactSensitiveText(String(failure.message).split('\n')[0].trim());
   }
 
   if (newFailures.length > 0) {
@@ -185,7 +186,7 @@ export function formatDailySummary(model) {
 
   if (model.repos.length === 0) {
     lines.push('No Bridge runs recorded for this day.', '');
-    return `${lines.join('\n').trim()}\n`;
+    return redactSensitiveText(`${lines.join('\n').trim()}\n`);
   }
 
   for (const entry of model.repos) {
@@ -203,7 +204,7 @@ export function formatDailySummary(model) {
     lines.push('');
   }
 
-  return `${lines.join('\n').trim()}\n`;
+  return redactSensitiveText(`${lines.join('\n').trim()}\n`);
 }
 
 async function readJsonReport(reportPath) {
