@@ -1,7 +1,12 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
-import { DEFAULT_BRANCH_PREFIX, PACKAGE_MANAGER_PRESETS, CONFIG_CANDIDATES } from '../constants.js';
+import {
+  CONFIG_CANDIDATES,
+  DEFAULT_BRANCH_PREFIX,
+  DEFAULT_COOLDOWN_DAYS,
+  PACKAGE_MANAGER_PRESETS
+} from '../constants.js';
 import { getBridgeVersion } from '../core/bridgeVersion.js';
 import { loadConfig } from '../core/configReader.js';
 import {
@@ -95,6 +100,7 @@ import {
   createPullRequest,
   findReusableBridgePullRequest,
   formatDuplicatePullRequestNotice,
+  getGitHubRepository,
   makePullRequestScopeKey,
   PullRequestLookupError,
   reusedPullRequestResult,
@@ -109,6 +115,20 @@ import {
   writeRunReport
 } from '../core/runReport.js';
 import { formatScriptSummaryTable, writeScriptCommandLog } from '../core/scriptSummary.js';
+import {
+  describeCiEnvironment,
+  resolveCloudSettings,
+  runUrlFor,
+  uploadRunReport
+} from '../core/cloud.js';
+import { configureUntrustedEnv } from '../core/executor.js';
+import { summarizeCooldownResults } from '../core/cooldown.js';
+import { writeHandoffBundle, writeHandoffOutcome, HANDOFF_REPORT_FILE } from '../core/handoff.js';
+import {
+  checkReleaseAgeCooldown,
+  formatCooldownViolations,
+  resolveNativeCooldown
+} from '../core/cooldown.js';
 import { collectRuntimeEnvironment } from '../core/runtimeEnvironment.js';
 import { resolvePathInside, resolveRealPathInside } from '../core/pathSafety.js';
 import {
@@ -226,6 +246,17 @@ function scopeLabel(scopePath) {
   return scopePath === '.' ? 'root' : scopePath;
 }
 
+function cooldownSettings(config) {
+  return {
+    cooldownDays:
+      typeof config.cooldownDays === 'number' && Number.isFinite(config.cooldownDays)
+        ? config.cooldownDays
+        : DEFAULT_COOLDOWN_DAYS,
+    cooldownExclude: Array.isArray(config.cooldownExclude) ? config.cooldownExclude : [],
+    cooldownNative: config.cooldownNative !== false
+  };
+}
+
 function buildPatchScopes(config) {
   const rootScope = {
     path: '.',
@@ -241,7 +272,8 @@ function buildPatchScopes(config) {
     blockOnBaselineFailures: config.blockOnBaselineFailures === true,
     allowMajorUpdates: config.allowMajorUpdates === true,
     bundleAnalysis: config.bundleAnalysis || null,
-    pythonZeroMajor: config.pythonZeroMajor || 'skip'
+    pythonZeroMajor: config.pythonZeroMajor || 'skip',
+    ...cooldownSettings(config)
   };
 
   const nestedScopes = Array.isArray(config.scopes)
@@ -266,7 +298,8 @@ function buildPatchScopes(config) {
             ? scope.allowMajorUpdates
             : config.allowMajorUpdates === true,
         bundleAnalysis: scope.bundleAnalysis || null,
-        pythonZeroMajor: scope.pythonZeroMajor || config.pythonZeroMajor || 'skip'
+        pythonZeroMajor: scope.pythonZeroMajor || config.pythonZeroMajor || 'skip',
+        ...cooldownSettings(config)
       }))
     : [];
 
@@ -671,6 +704,7 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
   let baselineLockfileContent = null;
   let metricsSummary = createDepDeltaSummary();
   let scopeDeltas = [];
+  let scopeCooldown = null;
   let localPackageSnapshot = null;
 
   line();
@@ -916,6 +950,18 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
     verbose
   });
 
+  const nativeCooldown = await resolveNativeCooldown({
+    packageManager: scope.packageManager,
+    days: scope.cooldownDays,
+    enabled: scope.cooldownNative !== false,
+    scopeDir,
+    rootDir: tempDir
+  });
+
+  if (scope.cooldownDays > 0) {
+    info(`Release-age cooldown (${label}): ${scope.cooldownDays} day(s); ${nativeCooldown.reason}`);
+  }
+
   const updateResult = await runPhase({
     run,
     phase: `update:${label}`,
@@ -930,10 +976,21 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
         });
       }
 
-      return runCommand(scope.updateCommand, {
-        cwd: scopeDir,
-        quiet: !verbose
-      });
+      try {
+        return await runCommand(scope.updateCommand, {
+          cwd: scopeDir,
+          quiet: !verbose,
+          env: { ...process.env, ...nativeCooldown.env }
+        });
+      } catch (updateError) {
+        if (nativeCooldown.applied) {
+          updateError.hint =
+            `The update ran with ${nativeCooldown.setting}=${nativeCooldown.value}. ` +
+            'If a private registry does not report publish times, add its packages to "cooldownExclude" or set "cooldownNative": false.';
+        }
+
+        throw updateError;
+      }
     },
     meta: { command: scope.updateCommand, scope: label }
   });
@@ -1141,7 +1198,7 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
             lockfileFormat,
             directDeps
           });
-          scopeDeltas = deltas;
+          scopeDeltas = deltas.map((delta) => ({ ...delta, scope: label }));
           const directMajorUpdates = deltas.filter(
             (delta) => delta.kind === 'direct' && delta.bump === 'major'
           );
@@ -1215,6 +1272,45 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
               policy: transitiveMajorPolicy,
               count: transitiveMajorResult.transitiveMajorCount,
               packages: transitiveMajorResult.packages
+            });
+          }
+
+          scopeCooldown = await checkReleaseAgeCooldown({
+            deltas,
+            lockfileFormat,
+            days: scope.cooldownDays,
+            exclude: scope.cooldownExclude,
+            label
+          });
+          scopeCooldown.native = nativeCooldown;
+
+          if (scopeCooldown.checked > 0 || scopeCooldown.unverified.length > 0) {
+            info(
+              `Release-age check (${label}): ${scopeCooldown.passed} of ${scopeCooldown.checked} version(s) older than ${scope.cooldownDays} day(s)` +
+                (scopeCooldown.unverified.length > 0
+                  ? `; ${scopeCooldown.unverified.length} could not be verified`
+                  : '')
+            );
+          }
+
+          await logPhase(run, `cooldown:${label}`, scopeCooldown.violations.length > 0 ? 'failed' : 'success', {
+            scope: label,
+            days: scope.cooldownDays,
+            checked: scopeCooldown.checked,
+            violations: scopeCooldown.violations.length,
+            unverified: scopeCooldown.unverified.length,
+            native: nativeCooldown.applied
+          });
+
+          if (scopeCooldown.violations.length > 0) {
+            throw new PatchPolicyError(formatCooldownViolations(scopeCooldown), null, {
+              gateType: 'cooldown_block',
+              scopeResult: {
+                metricsSummary: mergeDepDeltaSummaries(metricsSummary, summary),
+                deltas: scopeDeltas,
+                hasUpdates: true,
+                cooldown: scopeCooldown
+              }
             });
           }
 
@@ -1399,6 +1495,7 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
   const scopeResult = {
     metricsSummary,
     deltas: scopeDeltas,
+    cooldown: scopeCooldown,
     hasUpdates: !scopeHasNoUpdates,
     audit: {
       label,
@@ -1488,19 +1585,28 @@ export async function patchCommand({
   skipBeforeScripts = false,
   runBeforeScripts = false,
   scope: requestedScope = '',
-  localPackages: localPackageArguments = []
+  localPackages: localPackageArguments = [],
+  handoffDir = ''
 } = {}) {
   let config;
   let configPath = '';
   const run = makeRunContext('patch', cwd);
+  const resolvedHandoffDir = handoffDir ? path.resolve(cwd, handoffDir) : '';
+  const cloudSettings = resolveCloudSettings();
 
   if (keepWorkspace && !dryRun) {
     error('--keep-workspace is only available with --dry-run.');
     return false;
   }
 
+  if (resolvedHandoffDir && dryRun) {
+    error('--handoff cannot be combined with --dry-run.');
+    return false;
+  }
+
   try {
     ({ config, configPath } = await loadConfig(cwd));
+    configureUntrustedEnv({ allow: config.env?.allow || [] });
   } catch (configError) {
     error(configError.message);
     await logRunFailure(run, configError);
@@ -1531,7 +1637,15 @@ export async function patchCommand({
   printBanner();
   info(`Config: ${configPath}`);
   info(`Package manager: ${config.packageManager}`);
-  info(`Mode: ${dryRun ? 'dry run (no commit or push)' : 'commit and push'}`);
+  info(
+    `Mode: ${
+      dryRun
+        ? 'dry run (no commit or push)'
+        : resolvedHandoffDir
+          ? `handoff (no push; bundle for \`bridge publish\` in ${resolvedHandoffDir})`
+          : 'commit and push'
+    }`
+  );
   info(`Scope: ${requestedScope ? scopeLabel(normalizeScopePath(requestedScope)) : 'all'}`);
   info(`Command output: ${verbose ? 'streaming' : 'condensed'}`);
   info(
@@ -1561,6 +1675,15 @@ export async function patchCommand({
 
   let patchLock = { async release() {} };
   const portableOriginUrl = resolvePortableOriginUrl(cwd, await getOriginUrl(cwd));
+  const repositoryFullName =
+    getGitHubRepository(portableOriginUrl) || String(process.env.GITHUB_REPOSITORY || '').trim();
+  const repositoryInfo = {
+    fullName: repositoryFullName,
+    url: repositoryFullName ? `https://github.com/${repositoryFullName}` : ''
+  };
+  const ciEnvironment = describeCiEnvironment();
+  const runUrl = runUrlFor(cloudSettings, run.runId);
+  let handoffWritten = false;
   try {
     patchLock = await acquirePatchLock(
       resolvePatchLockKey({ cwd, repoName, originUrl: portableOriginUrl })
@@ -1592,6 +1715,7 @@ export async function patchCommand({
   const bundleResults = [];
   const validationResults = [];
   const dependencyDeltas = [];
+  const cooldownResults = [];
 
   let branchName = '';
   let compareUrl = '';
@@ -1674,7 +1798,11 @@ export async function patchCommand({
         blockedCount,
         environment: runtimeEnvironment,
         skipBeforeScripts: config?.skipBeforeScripts === true,
-        performance: perfSampler.snapshot()
+        performance: perfSampler.snapshot(),
+        dependencyDeltas,
+        cooldownResults,
+        repository: repositoryInfo,
+        ci: ciEnvironment
       });
       runReportPath = savedReport.reportPath;
       warn(`Run cancelled (${signal}). Partial report: ${runReportPath}`);
@@ -1812,6 +1940,9 @@ export async function patchCommand({
       if (Array.isArray(scopeResult.deltas)) {
         dependencyDeltas.push(...scopeResult.deltas);
       }
+      if (scopeResult.cooldown) {
+        cooldownResults.push(scopeResult.cooldown);
+      }
       if (scopeResult.hasUpdates) {
         anyScopeHadUpdates = true;
       }
@@ -1893,6 +2024,80 @@ export async function patchCommand({
       line();
       info('Change summary:');
       line(diffStat);
+    }
+
+    if (resolvedHandoffDir) {
+      const handoffScopeKey = makePullRequestScopeKey({
+        configSha256: configFileSha256,
+        requestedScope: requestedScope || 'all',
+        updateCommands: scopes.map((scope) => scope.updateCommand),
+        directPackages: dependencyDeltas
+          .filter((delta) => delta?.kind === 'direct')
+          .map((delta) => delta.name)
+      });
+      const cooldownSummary =
+        cooldownResults.length > 0 ? summarizeCooldownResults(cooldownResults) : null;
+      const pullRequestOptions = config.pullRequest || {};
+      // The clean-base step records short SHAs; publish needs the full base commit.
+      const fullBaseSha = (
+        await runCommand('git rev-parse HEAD', { cwd: tempDir, quiet: true })
+      ).stdout.trim();
+
+      await runPhase({
+        run,
+        phase: 'handoff',
+        spinnerText: 'Writing handoff bundle...',
+        successText: 'Handoff bundle written',
+        task: () =>
+          writeHandoffBundle({
+            handoffDir: resolvedHandoffDir,
+            workspaceDir: tempDir,
+            stagedFiles,
+            runId: run.runId,
+            repository: repositoryInfo,
+            base: { branch: baseBranch, sha: fullBaseSha },
+            branch: {
+              name: branchName,
+              prefix: branchPrefix,
+              protectedBranches: config.protectedBranches || []
+            },
+            scopeKey: handoffScopeKey,
+            pullRequest: {
+              enabled: pullRequestOptions.enabled !== false,
+              draft: pullRequestOptions.draft === true,
+              title: pullRequestOptions.title || '',
+              body:
+                pullRequestOptions.body ||
+                buildPullRequestBody({
+                  branchName,
+                  baseBranch,
+                  dependencySummary: depDeltaSummary,
+                  dependencyDeltas,
+                  auditResults,
+                  validationResults,
+                  bundleResults,
+                  runId: run.runId,
+                  runUrl,
+                  cooldown: cooldownSummary,
+                  bridgeVersion: getBridgeVersion()
+                })
+            },
+            summary: {
+              direct: depDeltaSummary.directChanged || 0,
+              transitive: depDeltaSummary.transitiveChanged || 0,
+              byBump: depDeltaSummary.byBump || {},
+              cooldownDays: cooldownSummary?.days || 0,
+              cooldownChecked: cooldownSummary?.checked || 0
+            }
+          })
+      });
+      handoffWritten = true;
+      status = 'handoff_ready';
+      success(
+        `Ready to publish. Run \`bridge publish ${resolvedHandoffDir}\` in a job that holds push credentials.`
+      );
+      await logRunEnd(run, 'handoff_ready', { branchName, baseBranch, changedFilesCount });
+      return true;
     }
 
     if (dryRun) {
@@ -2034,7 +2239,8 @@ export async function patchCommand({
         if (shouldUpdateExisting) {
           await runCommand(forceWithLeasePushCommand(pushBranchName, leaseSha), {
             cwd: tempDir,
-            quiet: !verbose
+            quiet: !verbose,
+            trusted: true
           });
           return;
         }
@@ -2059,7 +2265,9 @@ export async function patchCommand({
       auditResults,
       validationResults,
       bundleResults,
-      runReportPath,
+      runId: run.runId,
+      runUrl,
+      cooldown: cooldownResults.length > 0 ? summarizeCooldownResults(cooldownResults) : null,
       bridgeVersion: getBridgeVersion(),
       scopeMeta
     });
@@ -2094,7 +2302,9 @@ export async function patchCommand({
         auditResults,
         validationResults,
         bundleResults,
-        runReportPath,
+        runId: run.runId,
+        runUrl,
+        cooldown: cooldownResults.length > 0 ? summarizeCooldownResults(cooldownResults) : null,
         bridgeVersion: getBridgeVersion(),
         scopeMeta,
         options: config.pullRequest
@@ -2162,6 +2372,9 @@ export async function patchCommand({
       if (Array.isArray(patchError.scopeResult.deltas)) {
         dependencyDeltas.push(...patchError.scopeResult.deltas);
       }
+      if (patchError.scopeResult.cooldown) {
+        cooldownResults.push(patchError.scopeResult.cooldown);
+      }
     }
 
     if (patchError instanceof PatchPolicyError || patchError.gateType) {
@@ -2182,6 +2395,10 @@ export async function patchCommand({
         if (combined.trim()) {
           line(combined.trim());
         }
+      }
+
+      if (patchError.hint) {
+        warn(patchError.hint);
       }
 
       const recoveryCommand = await findAuthenticationRecoveryCommand(
@@ -2212,7 +2429,11 @@ export async function patchCommand({
 
     await logRunFailure(run, patchError, { branchName });
     await logRunEnd(run, 'failed', { branchName, earlyExit });
-    return false;
+    // In handoff (CI) mode a policy block is a normal outcome, not a broken job:
+    // the publish job records it and nothing is pushed.
+    return Boolean(
+      resolvedHandoffDir && (patchError instanceof PatchPolicyError || patchError.gateType)
+    );
   } finally {
     performance = perfSampler.stop();
     uninstallSignals();
@@ -2268,12 +2489,46 @@ export async function patchCommand({
         blockedCount,
         environment: runtimeEnvironment,
         skipBeforeScripts: config?.skipBeforeScripts === true,
-        performance
+        performance,
+        dependencyDeltas,
+        cooldownResults,
+        repository: repositoryInfo,
+        ci: ciEnvironment
       });
       runReportPath = savedReport.reportPath;
 
       if (savedReport.report?.timeSaved) {
         await logRunSignal(run, savedReport.report.timeSaved);
+      }
+
+      if (resolvedHandoffDir) {
+        try {
+          await fs.mkdir(resolvedHandoffDir, { recursive: true });
+          await fs.copyFile(runReportPath, path.join(resolvedHandoffDir, HANDOFF_REPORT_FILE));
+
+          if (!handoffWritten) {
+            const blocked = Boolean(failure && (failure instanceof PatchPolicyError || failure.gateType));
+            await writeHandoffOutcome({
+              handoffDir: resolvedHandoffDir,
+              runId: run.runId,
+              status:
+                status === 'up_to_date' ? 'up_to_date' : blocked ? 'blocked' : 'failed',
+              repository: repositoryInfo,
+              message: failure?.message || (status === 'up_to_date' ? 'Dependencies are up to date.' : ''),
+              gateType: failure?.gateType || ''
+            });
+          }
+        } catch (handoffError) {
+          warn(`Could not write the handoff outcome: ${handoffError.message}`);
+        }
+      } else if (cloudSettings.apiUrl && !dryRun) {
+        const upload = await uploadRunReport(cloudSettings, savedReport.report);
+
+        if (upload.status === 'uploaded') {
+          info(`Run recorded in Bridge: ${upload.url}`);
+        } else if (upload.status === 'failed') {
+          warn(upload.message);
+        }
       }
 
       try {

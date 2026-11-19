@@ -4,8 +4,10 @@ import path from 'node:path';
 import prompts from 'prompts';
 
 import {
+  CONFIG_CANDIDATES,
   CONFIG_FILE_NAME,
   DEFAULT_BRANCH_PREFIX,
+  DEFAULT_COOLDOWN_DAYS,
   PACKAGE_MANAGER_OPTIONS,
   PACKAGE_MANAGER_PRESETS
 } from '../constants.js';
@@ -15,7 +17,7 @@ import {
   logRunStart,
   makeRunContext
 } from '../core/activityLogger.js';
-import { detectProject } from '../core/detector.js';
+import { detectProject, detectValidationScripts } from '../core/detector.js';
 import { formatConfig } from '../core/configReader.js';
 import { printBanner } from '../ui/banner.js';
 import { info, line, success, warn } from '../ui/logger.js';
@@ -36,12 +38,62 @@ function managerPromptIndex(defaultManager) {
   return index >= 0 ? index : 0;
 }
 
-export async function initCommand({ cwd = process.cwd() } = {}) {
+async function findExistingConfig(cwd) {
+  for (const candidate of CONFIG_CANDIDATES) {
+    try {
+      await fs.access(path.join(cwd, candidate));
+      return candidate;
+    } catch {
+      // Keep looking.
+    }
+  }
+
+  return '';
+}
+
+export function buildDetectedConfig({ name, packageManager, afterScripts = [] }) {
+  const managerPreset = PACKAGE_MANAGER_PRESETS[packageManager] || PACKAGE_MANAGER_PRESETS.npm;
+
+  return {
+    name: String(name || '').trim(),
+    packageManager,
+    installCommand: managerPreset.installCommand,
+    updateCommand: managerPreset.updateCommand,
+    cleanCommands: [...managerPreset.cleanCommands],
+    beforeScripts: [],
+    afterScripts: [...afterScripts],
+    // The committed tree is the baseline: Bridge runs afterScripts on it first, so a
+    // check that already fails on main never blocks an update.
+    skipBeforeScripts: true,
+    auditCommand: managerPreset.auditCommand || '',
+    blockOnNewVulnerabilities: true,
+    allowMajorUpdates: false,
+    cooldownDays: DEFAULT_COOLDOWN_DAYS,
+    pullRequest: {
+      enabled: true,
+      draft: false
+    },
+    branchPrefix: DEFAULT_BRANCH_PREFIX
+  };
+}
+
+export async function initCommand({ cwd = process.cwd(), yes = false, force = false } = {}) {
   const run = makeRunContext('init', cwd);
 
   try {
     await logRunStart(run);
-    printBanner();
+
+    if (!yes) {
+      printBanner();
+    }
+
+    const existingConfig = await findExistingConfig(cwd);
+
+    if (existingConfig && yes && !force) {
+      info(`${existingConfig} already exists; leaving it unchanged (use --force to replace it).`);
+      await logRunEnd(run, 'exists');
+      return true;
+    }
 
     const detected = await detectProject(cwd);
     const detectedManager = detected.packageManager || null;
@@ -55,6 +107,31 @@ export async function initCommand({ cwd = process.cwd() } = {}) {
         unsupported: detected.unsupported
       });
       return false;
+    }
+
+    if (yes) {
+      if (!detectedManager) {
+        warn('Could not detect a package manager. Run `bridge init` interactively instead.');
+        await logRunEnd(run, 'undetected');
+        return false;
+      }
+
+      const afterScripts = await detectValidationScripts(cwd, detectedManager);
+      const config = buildDetectedConfig({
+        name: detected.name,
+        packageManager: detectedManager,
+        afterScripts
+      });
+      const configPath = path.join(cwd, CONFIG_FILE_NAME);
+      await fs.writeFile(configPath, `${formatConfig(config)}\n`, 'utf8');
+      success(`Created ${CONFIG_FILE_NAME} with detected defaults.`);
+      info(
+        afterScripts.length > 0
+          ? `Checks Bridge will run before and after each update: ${afterScripts.join(', ')}`
+          : 'No typecheck, lint, test or build scripts found; Bridge will rely on install and audit only.'
+      );
+      await logRunEnd(run, 'created', { packageManager: detectedManager, detected: true });
+      return true;
     }
 
     const basePrompts = [
@@ -87,6 +164,7 @@ export async function initCommand({ cwd = process.cwd() } = {}) {
 
     const packageManager = detectedManager || baseResponses.packageManager || 'npm';
     const managerPreset = PACKAGE_MANAGER_PRESETS[packageManager] || PACKAGE_MANAGER_PRESETS.npm;
+    const detectedChecks = await detectValidationScripts(cwd, packageManager);
 
     const detailResponses = await prompts(
       [
@@ -117,8 +195,8 @@ export async function initCommand({ cwd = process.cwd() } = {}) {
         {
           type: 'text',
           name: 'afterScripts',
-          message: 'After scripts (optional, comma or newline separated)',
-          initial: ''
+          message: 'Checks to run before and after the update (comma or newline separated)',
+          initial: detectedChecks.join(', ')
         },
         {
           type: 'text',
@@ -155,9 +233,11 @@ export async function initCommand({ cwd = process.cwd() } = {}) {
       cleanCommands: parseCommandList(detailResponses.cleanCommands, managerPreset.cleanCommands),
       beforeScripts: parseCommandList(detailResponses.beforeScripts, []),
       afterScripts: parseCommandList(detailResponses.afterScripts, []),
+      skipBeforeScripts: parseCommandList(detailResponses.beforeScripts, []).length === 0,
       auditCommand: managerPreset.auditCommand || '',
       blockOnNewVulnerabilities: true,
       allowMajorUpdates: false,
+      cooldownDays: DEFAULT_COOLDOWN_DAYS,
       pullRequest: {
         enabled: true,
         draft: false

@@ -14,19 +14,51 @@ upstream inference.
 
 ## Quick Start
 
-1. Install from the npm registry:
+### Run Bridge in GitHub Actions (recommended)
 
-```bash
-npm install -g @connormccoy/bridge
+Add `.github/workflows/bridge.yml` to a repository (copy
+[`templates/github-workflow.yml`](templates/github-workflow.yml)):
+
+```yaml
+name: Bridge
+on:
+  schedule:
+    - cron: '17 13 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  bridge:
+    uses: cmccoy02/bridge-cli/.github/workflows/bridge.yml@main
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      api-url: https://YOUR-BRIDGE-CONSOLE.vercel.app
 ```
 
-Or run without installing:
+No repository secrets are needed when the Bridge GitHub App is installed. The
+workflow runs in two jobs (see [docs/ci.md](docs/ci.md)):
+
+- **update** installs, updates and runs your checks with read-only permissions
+  and no write credentials, then hands off only manifests and lockfiles;
+- **publish** gets a short-lived GitHub App token from the Bridge console via
+  OIDC, pushes `bridge/...` and opens or refreshes the pull request. It never
+  installs or runs package code.
+
+If the repository has no `bridge.config.json`, Bridge writes one from detected
+defaults: your package manager, plus `typecheck`, `lint`, `test` and `build`
+scripts as the checks to run before and after the update.
+
+### Run Bridge on your machine
+
+1. Install from this repository (the npm package is not published yet):
 
 ```bash
-npx @connormccoy/bridge --help
+npm install -g github:cmccoy02/bridge-cli
+bridge --help
 ```
 
-For local source testing from this repository:
+For local source testing from a checkout of this repository:
 
 ```bash
 npm install -g .
@@ -37,7 +69,8 @@ bridge --help
 
 ```bash
 cd your-project
-bridge init
+bridge init          # interactive
+bridge init --yes    # detected defaults, no prompts
 ```
 
 3. Check the project setup, simulate a patch, then run it for real:
@@ -313,6 +346,50 @@ These artifacts are designed for agents to understand why a run succeeded,
 failed, or exited early — enabling automated triage and self-improvement loops.
 
 ## Config Reference
+
+### Release-age cooldown
+
+Bridge does not propose a version until it has been public for `cooldownDays`
+(default `3`). Most malicious releases are found and pulled within hours to a
+few days, so waiting is the cheapest supply-chain defense there is.
+
+```json
+{
+  "cooldownDays": 3,
+  "cooldownExclude": ["@your-org/*"],
+  "cooldownNative": true
+}
+```
+
+- During the update, Bridge passes the package manager's own setting (npm
+  11.10+ `min-release-age`, pnpm 10.16+ `minimumReleaseAge`, Yarn 4.10+
+  `npmMinimalAgeGate`) so the resolver picks older versions. A setting your
+  repository already declares is always respected, never overridden.
+- After the update, Bridge checks the publish time of every changed version
+  (npm registry or PyPI). Anything newer than the cooldown blocks the run with
+  gate `cooldown_block`; the report lists when each version becomes eligible.
+- `cooldownExclude` skips packages by name or pattern, for internal packages or
+  an urgent fix you have reviewed. `cooldownNative: false` keeps the check but
+  stops passing the native setting (for private registries that do not report
+  publish times). `cooldownDays: 0` turns the cooldown off.
+
+### Credentials and package scripts
+
+Commands that run package code (install, update, your checks, builds) never see
+`GH_TOKEN`, `GITHUB_TOKEN`, the GitHub Actions OIDC request token or Bridge
+tokens. Registry credentials such as `NODE_AUTH_TOKEN` and `NPM_TOKEN` are kept.
+If a build genuinely needs one of the removed variables, opt it back in:
+
+```json
+{ "env": { "allow": ["GITHUB_TOKEN"] } }
+```
+
+### Bridge console
+
+Set `BRIDGE_API_URL` (and `BRIDGE_API_TOKEN` outside GitHub Actions) to record
+every run in the Bridge console. Pull request bodies link to the run there
+instead of printing a local report path.
+
 
 File: `bridge.config.json` (or `.bridge.config.json`)
 

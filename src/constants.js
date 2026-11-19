@@ -23,6 +23,10 @@ export const DEPENDENCY_ARTIFACT_BASENAMES = new Set([
   'mix.lock'
 ]);
 
+// Wait this many days after a version is published before Bridge will propose it.
+// Most malicious releases are found and pulled within hours to a few days.
+export const DEFAULT_COOLDOWN_DAYS = 3;
+
 export const REQUIRED_CONFIG_FIELDS = [
   'packageManager',
   'installCommand',

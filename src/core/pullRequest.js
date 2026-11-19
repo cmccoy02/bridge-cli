@@ -36,6 +36,11 @@ function throwPullRequestLookupError(detail) {
   );
 }
 
+// gh needs GH_TOKEN/GITHUB_TOKEN, so its calls opt out of credential scrubbing.
+function runTrustedCommand(command, options = {}) {
+  return runCommand(command, { ...options, trusted: true });
+}
+
 function shellQuote(value) {
   return `'${String(value ?? '').replace(/'/g, `"'"'`)}'`;
 }
@@ -386,6 +391,43 @@ export function formatDuplicatePullRequestNotice(duplicates = []) {
   return `Other matching Bridge PR(s): ${labeled}`;
 }
 
+function formatCooldownSection(cooldown) {
+  if (!cooldown || !(cooldown.days > 0)) {
+    return [];
+  }
+
+  const checked = Number(cooldown.checked) || 0;
+  const unverified = Array.isArray(cooldown.unverified) ? cooldown.unverified.length : 0;
+  const excluded = Array.isArray(cooldown.excluded) ? cooldown.excluded.length : 0;
+  const lines = ['', '### Release-age cooldown', ''];
+
+  if (checked > 0) {
+    lines.push(
+      checked === 1
+        ? `- The updated version was published at least ${cooldown.days} day${cooldown.days === 1 ? '' : 's'} ago.`
+        : `- All ${checked} updated versions were published at least ${cooldown.days} day${cooldown.days === 1 ? '' : 's'} ago.`
+    );
+  } else {
+    lines.push(`- Cooldown: ${cooldown.days} day${cooldown.days === 1 ? '' : 's'}.`);
+  }
+
+  if (unverified > 0) {
+    const names = cooldown.unverified
+      .slice(0, 5)
+      .map((entry) => `\`${entry.name}@${entry.version}\``)
+      .join(', ');
+    lines.push(
+      `- ${unverified} version${unverified === 1 ? '' : 's'} could not be checked against the public registry (${names}${unverified > 5 ? ', …' : ''}).`
+    );
+  }
+
+  if (excluded > 0) {
+    lines.push(`- ${excluded} version${excluded === 1 ? '' : 's'} skipped by \`cooldownExclude\`.`);
+  }
+
+  return lines;
+}
+
 export function buildPullRequestBody({
   branchName,
   baseBranch,
@@ -394,10 +436,16 @@ export function buildPullRequestBody({
   auditResults,
   validationResults,
   bundleResults = [],
-  runReportPath,
+  runReportPath: _localReportPath = '',
+  runId = '',
+  runUrl = '',
+  cooldown = null,
   bridgeVersion = '',
   scopeMeta = null
 }) {
+  // The local report path is deliberately never printed: it leaks the runner's home
+  // directory and is useless to reviewers. The run ID / console link replace it.
+  void _localReportPath;
   const direct = Number(dependencySummary?.directChanged) || 0;
   const transitive = Number(dependencySummary?.transitiveChanged) || 0;
   const byBump = dependencySummary?.byBump;
@@ -421,6 +469,7 @@ export function buildPullRequestBody({
   }
 
   lines.push(...formatPackageTable(dependencyDeltas));
+  lines.push(...formatCooldownSection(cooldown));
   lines.push(...formatBundleSection(bundleResults));
 
   if (Array.isArray(auditResults) && auditResults.length > 0) {
@@ -477,8 +526,10 @@ export function buildPullRequestBody({
     'Bridge ran the repository-configured validation checks before and after the update. Please review the diff and CI before merging.'
   );
 
-  if (runReportPath) {
-    lines.push('', `> Report: \`${runReportPath}\``);
+  if (runUrl) {
+    lines.push('', `> Bridge run: [${runId || 'details'}](${runUrl})`);
+  } else if (runId) {
+    lines.push('', `> Bridge run ID: \`${runId}\``);
   }
 
   if (scopeMeta && typeof scopeMeta === 'object') {
@@ -566,7 +617,7 @@ export async function findReusableBridgePullRequest({
   stagedDiff = '',
   scopeKey = '',
   commandExistsFn = commandExists,
-  runCommandFn = runCommand
+  runCommandFn = runTrustedCommand
 } = {}) {
   if (!stagedDiff || !(await commandExistsFn('gh'))) {
     return null;
@@ -706,7 +757,7 @@ export async function updatePullRequest({
   body = '',
   title = '',
   commandExistsFn = commandExists,
-  runCommandFn = runCommand
+  runCommandFn = runTrustedCommand
 } = {}) {
   if (!number || !(await commandExistsFn('gh'))) {
     return { status: 'unavailable', url: '', message: 'GitHub CLI is not available to update the pull request.' };
@@ -786,11 +837,14 @@ export async function createPullRequest({
   validationResults = [],
   bundleResults = [],
   runReportPath = '',
+  runId = '',
+  runUrl = '',
+  cooldown = null,
   bridgeVersion = '',
   scopeMeta = null,
   options,
   commandExistsFn = commandExists,
-  runCommandFn = runCommand
+  runCommandFn = runTrustedCommand
 } = {}) {
   const config = normalizeOptions(options);
 
@@ -831,6 +885,9 @@ export async function createPullRequest({
     validationResults,
     bundleResults,
     runReportPath,
+    runId,
+    runUrl,
+    cooldown,
     bridgeVersion,
     scopeMeta
   });

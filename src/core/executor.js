@@ -13,14 +13,75 @@ export class CommandExecutionError extends Error {
   }
 }
 
+// Credentials Bridge itself uses (GitHub tokens, the Actions OIDC request token,
+// Bridge cloud tokens). Package scripts never need them, so they are removed from
+// the environment of every command unless the caller marks it `trusted`.
+const SCRUBBED_ENV_NAMES = new Set([
+  'GH_TOKEN',
+  'GITHUB_TOKEN',
+  'GH_ENTERPRISE_TOKEN',
+  'GITHUB_ENTERPRISE_TOKEN',
+  'ACTIONS_ID_TOKEN_REQUEST_TOKEN',
+  'ACTIONS_ID_TOKEN_REQUEST_URL',
+  'ACTIONS_RUNTIME_TOKEN',
+  'ACTIONS_RUNTIME_URL',
+  'ACTIONS_CACHE_URL',
+  'ACTIONS_RESULTS_URL'
+]);
+const SCRUBBED_ENV_PATTERNS = [/^BRIDGE_[A-Z0-9_]*(TOKEN|SECRET|KEY|PASSWORD)$/];
+
+let untrustedEnvAllowlist = new Set();
+
+/**
+ * Lets a project opt specific variables back in (config `env.allow`), e.g. a build
+ * that genuinely needs GITHUB_TOKEN to download a release asset.
+ */
+export function configureUntrustedEnv({ allow = [] } = {}) {
+  untrustedEnvAllowlist = new Set(
+    (Array.isArray(allow) ? allow : [])
+      .map((name) => String(name || '').trim().toUpperCase())
+      .filter(Boolean)
+  );
+}
+
+export function isScrubbedEnvName(name) {
+  const upper = String(name || '').toUpperCase();
+
+  if (untrustedEnvAllowlist.has(upper)) {
+    return false;
+  }
+
+  return SCRUBBED_ENV_NAMES.has(upper) || SCRUBBED_ENV_PATTERNS.some((pattern) => pattern.test(upper));
+}
+
+export function buildUntrustedEnv(env = process.env) {
+  const childEnv = {};
+
+  for (const [name, value] of Object.entries(env || {})) {
+    if (value === undefined || isScrubbedEnvName(name)) {
+      continue;
+    }
+
+    childEnv[name] = value;
+  }
+
+  return childEnv;
+}
+
 export function runCommand(
   command,
-  { cwd = process.cwd(), allowFailure = false, quiet = true, env = process.env } = {}
+  {
+    cwd = process.cwd(),
+    allowFailure = false,
+    quiet = true,
+    env = process.env,
+    trusted = false
+  } = {}
 ) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, {
       cwd,
-      env,
+      env: trusted ? env : buildUntrustedEnv(env),
       shell: true
     });
 

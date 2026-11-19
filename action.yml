@@ -1,0 +1,70 @@
+name: Bridge
+description: Keep dependencies patched. Bridge opens a pull request only after the update passes your own checks.
+author: Bridge
+branding:
+  icon: shield
+  color: blue
+
+# Two modes, meant for two separate jobs (see .github/workflows/bridge.yml):
+#   update  - installs, updates, runs your checks. Holds NO push credentials.
+#   publish - pushes the validated result and opens the PR. Runs NO package code.
+
+inputs:
+  mode:
+    description: "'update' or 'publish'"
+    required: true
+  handoff-dir:
+    description: Directory for the handoff bundle (defaults to $RUNNER_TEMP/bridge-handoff).
+    required: false
+    default: ''
+  working-directory:
+    description: Path to the repository checkout.
+    required: false
+    default: '.'
+  api-url:
+    description: Bridge console URL. Enables the GitHub App token broker and the run ledger.
+    required: false
+    default: ''
+  args:
+    description: Extra arguments for `bridge patch` in update mode (for example `--verbose`).
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Install Bridge CLI
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: npm ci --omit=dev --ignore-scripts --no-audit --no-fund --loglevel=error
+
+    - name: Create a config from detected defaults (if the repo has none)
+      if: inputs.mode == 'update'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: node "$GITHUB_ACTION_PATH/bin/bridge.js" init --yes
+
+    - name: Update dependencies and run checks
+      if: inputs.mode == 'update'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        BRIDGE_API_URL: ${{ inputs.api-url }}
+        BRIDGE_HANDOFF_DIR: ${{ inputs.handoff-dir }}
+        BRIDGE_ARGS: ${{ inputs.args }}
+        CI: 'true'
+      run: |
+        handoff_dir="${BRIDGE_HANDOFF_DIR:-$RUNNER_TEMP/bridge-handoff}"
+        read -r -a extra_args <<< "${BRIDGE_ARGS}"
+        node "$GITHUB_ACTION_PATH/bin/bridge.js" patch --handoff "$handoff_dir" "${extra_args[@]}"
+
+    - name: Publish branch and pull request
+      if: inputs.mode == 'publish'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        BRIDGE_API_URL: ${{ inputs.api-url }}
+        BRIDGE_HANDOFF_DIR: ${{ inputs.handoff-dir }}
+      run: |
+        handoff_dir="${BRIDGE_HANDOFF_DIR:-$RUNNER_TEMP/bridge-handoff}"
+        node "$GITHUB_ACTION_PATH/bin/bridge.js" publish "$handoff_dir"

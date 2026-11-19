@@ -1,0 +1,20 @@
+# .github/workflows/bridge.yml — runs Bridge every weekday morning and on demand.
+name: Bridge
+
+on:
+  schedule:
+    - cron: '17 13 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  bridge:
+    uses: cmccoy02/bridge-cli/.github/workflows/bridge.yml@main
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      api-url: https://YOUR-BRIDGE-CONSOLE.vercel.app
+      # node-version-file: .nvmrc
+      # npm-version: '11'          # npm 11.10+ enforces the cooldown while resolving
+    # secrets:
+    #   npm-token: ${{ secrets.NPM_TOKEN }}   # private registry, if any

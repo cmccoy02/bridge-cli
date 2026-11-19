@@ -5,6 +5,7 @@ import { Command } from 'commander';
 import { configCommand } from '../src/commands/config.js';
 import { initCommand } from '../src/commands/init.js';
 import { patchCommand } from '../src/commands/patch.js';
+import { publishCommand } from '../src/commands/publish.js';
 import { reportCommand } from '../src/commands/report.js';
 import {
   scheduleInstallCommand,
@@ -30,9 +31,11 @@ program
 
 program
   .command('init')
-  .description('Interactive onboarding that creates bridge.config.json')
-  .action(async () => {
-    const ok = await initCommand();
+  .description('Create bridge.config.json (interactive, or detected defaults with --yes)')
+  .option('-y, --yes', 'Accept detected defaults without prompting (for CI)')
+  .option('--force', 'Overwrite an existing config without asking')
+  .action(async (options) => {
+    const ok = await initCommand({ yes: options.yes, force: options.force });
     if (!ok) {
       process.exitCode = 1;
     }
@@ -63,8 +66,13 @@ program
     collectOption,
     []
   )
+  .option(
+    '--handoff <dir>',
+    'CI mode: validate the update but do not push; write a bundle for `bridge publish`'
+  )
   .action(async (options) => {
     const ok = await patchCommand({
+      handoffDir: options.handoff,
       dryRun: options.dryRun,
       keepWorkspace: options.keepWorkspace,
       verbose: options.verbose,
@@ -74,6 +82,18 @@ program
       scope: options.scope,
       localPackages: options.localPackage
     });
+    if (!ok) {
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command('publish')
+  .description('Push a validated handoff bundle and open or refresh the Bridge pull request')
+  .argument('<dir>', 'Handoff directory written by `bridge patch --handoff`')
+  .option('--branch-prefix <prefix>', 'Only push branches that start with this prefix', 'bridge/')
+  .action(async (dir, options) => {
+    const ok = await publishCommand({ handoffDir: dir, branchPrefix: options.branchPrefix });
     if (!ok) {
       process.exitCode = 1;
     }

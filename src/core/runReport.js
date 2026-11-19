@@ -5,6 +5,8 @@ import { getActivityLogPath, getBridgeHome, getRunOperationsLogPath } from './ac
 import { AGENT_TELEMETRY_SCHEMA_VERSION, getAgentEventStreamPath } from './agentTelemetry.js';
 import { redactActivityPayload, redactSensitiveText } from './redaction.js';
 import { buildRunSignal } from './runSignal.js';
+import { describeCiEnvironment } from './cloud.js';
+import { summarizeCooldownResults } from './cooldown.js';
 import { formatValidationGateReason } from './scriptDiff.js';
 import {
   buildScriptSummary,
@@ -48,6 +50,19 @@ async function readRunEvents(runId) {
 
     throw error;
   }
+}
+
+const MAX_REPORTED_DELTAS = 5000;
+
+function summarizeDependencyDeltas(deltas = []) {
+  return (Array.isArray(deltas) ? deltas : []).slice(0, MAX_REPORTED_DELTAS).map((delta) => ({
+    name: delta.name,
+    from: delta.from ?? null,
+    to: delta.to ?? null,
+    bump: delta.bump || 'other',
+    kind: delta.kind || 'transitive',
+    scope: delta.scope || 'root'
+  }));
 }
 
 export function getRunDirectory(runId) {
@@ -535,7 +550,11 @@ export async function writeRunReport({
   environment = null,
   scriptSummary = null,
   skipBeforeScripts = false,
-  performance = null
+  performance = null,
+  dependencyDeltas = [],
+  cooldownResults = [],
+  repository = null,
+  ci = null
 } = {}) {
   const events = await readRunEvents(run.runId);
   const finishedEvent = [...events].reverse().find((event) => event.event === 'run_finished');
@@ -591,6 +610,8 @@ export async function writeRunReport({
       pid: run.pid || process.pid
     },
     environment: resolvedEnvironment,
+    repository: repository || null,
+    ci: ci || describeCiEnvironment(),
     target: {
       repository: repo,
       configPath,
@@ -623,6 +644,8 @@ export async function writeRunReport({
     outcome: {
       changedFilesCount,
       dependencySummary: resolvedDependencySummary,
+      dependencyDeltas: summarizeDependencyDeltas(dependencyDeltas),
+      cooldown: cooldownResults.length > 0 ? summarizeCooldownResults(cooldownResults) : null,
       audits: resolvedAudits,
       bundles: resolvedBundles,
       validation: resolvedValidation,

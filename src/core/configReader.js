@@ -5,6 +5,7 @@ import {
   CONFIG_CANDIDATES,
   CONFIG_FILE_NAME,
   DEFAULT_BRANCH_PREFIX,
+  DEFAULT_COOLDOWN_DAYS,
   REQUIRED_CONFIG_FIELDS
 } from '../constants.js';
 
@@ -271,6 +272,40 @@ function findShapeIssues(config) {
     issues.push('allowMajorUpdates must be true or false');
   }
 
+  if (
+    'cooldownDays' in config &&
+    (typeof config.cooldownDays !== 'number' ||
+      !Number.isFinite(config.cooldownDays) ||
+      config.cooldownDays < 0 ||
+      config.cooldownDays > 90)
+  ) {
+    issues.push('cooldownDays must be a number of days from 0 to 90 (0 turns the cooldown off)');
+  }
+
+  if (
+    'cooldownExclude' in config &&
+    (!Array.isArray(config.cooldownExclude) ||
+      config.cooldownExclude.some((pattern) => typeof pattern !== 'string'))
+  ) {
+    issues.push('cooldownExclude must be an array of package names or patterns such as "@acme/*"');
+  }
+
+  if ('cooldownNative' in config && typeof config.cooldownNative !== 'boolean') {
+    issues.push('cooldownNative must be true or false');
+  }
+
+  if ('env' in config) {
+    if (!config.env || typeof config.env !== 'object' || Array.isArray(config.env)) {
+      issues.push('env must be an object such as { "allow": ["GITHUB_TOKEN"] }');
+    } else if (
+      'allow' in config.env &&
+      (!Array.isArray(config.env.allow) ||
+        config.env.allow.some((name) => typeof name !== 'string'))
+    ) {
+      issues.push('env.allow must be an array of environment variable names');
+    }
+  }
+
   validateBundleAnalysis(config.bundleAnalysis, 'bundleAnalysis', issues);
   validateVisualizerOwnership(config, 'root', 'bundleAnalysis', issues);
   validatePullRequest(config.pullRequest, issues);
@@ -434,6 +469,15 @@ export function normalizeConfig(config) {
         : false,
     allowMajorUpdates:
       typeof config.allowMajorUpdates === 'boolean' ? config.allowMajorUpdates : false,
+    cooldownDays:
+      typeof config.cooldownDays === 'number' && Number.isFinite(config.cooldownDays)
+        ? config.cooldownDays
+        : DEFAULT_COOLDOWN_DAYS,
+    cooldownExclude: normalizeArray(config.cooldownExclude),
+    cooldownNative: config.cooldownNative !== false,
+    env: {
+      allow: normalizeArray(config.env?.allow)
+    },
     bundleAnalysis: normalizeBundleAnalysis(config.bundleAnalysis),
     pullRequest: normalizePullRequest(config.pullRequest),
     scopes,

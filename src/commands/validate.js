@@ -249,7 +249,8 @@ export async function validateCommand({
       if (originUrl) {
         const probe = await runCommand(`git ls-remote ${quote(originUrl)} HEAD`, {
           allowFailure: true,
-          quiet: true
+          quiet: true,
+          trusted: true
         });
 
         if (!probe.success) {
@@ -267,7 +268,8 @@ export async function validateCommand({
       } else {
         const ghAuth = await runCommand('gh auth status', {
           allowFailure: true,
-          quiet: true
+          quiet: true,
+          trusted: true
         });
 
         if (!ghAuth.success) {

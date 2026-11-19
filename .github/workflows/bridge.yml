@@ -1,0 +1,158 @@
+# Reusable Bridge workflow. Call it from a repository like this:
+#
+#   jobs:
+#     bridge:
+#       uses: cmccoy02/bridge-cli/.github/workflows/bridge.yml@main
+#       permissions:
+#         contents: read
+#         id-token: write
+#       with:
+#         api-url: https://your-bridge-console.example.com
+#
+# Security model: the `update` job runs package installs, lifecycle scripts and your
+# checks, so it gets read-only permissions and no OIDC. The `publish` job holds the
+# only write credential (a short-lived GitHub App token from the Bridge console,
+# minted via OIDC) and never installs or runs package code. It accepts only
+# manifests and lockfiles from the update job.
+name: Bridge
+
+on:
+  workflow_call:
+    inputs:
+      api-url:
+        description: Bridge console URL (token broker + run ledger). Leave empty to use a BRIDGE_GITHUB_TOKEN secret instead.
+        type: string
+        default: ''
+      working-directory:
+        type: string
+        default: '.'
+      node-version:
+        description: Node.js for your project (ignored when node-version-file is set).
+        type: string
+        default: 'lts/*'
+      node-version-file:
+        description: For example .nvmrc or .node-version.
+        type: string
+        default: ''
+      npm-version:
+        description: Install this npm first (npm 11.10+ enforces the release-age cooldown natively).
+        type: string
+        default: ''
+      registry-url:
+        description: Private npm registry URL, used with the npm-token secret.
+        type: string
+        default: ''
+      registry-scope:
+        type: string
+        default: ''
+      args:
+        description: Extra `bridge patch` arguments.
+        type: string
+        default: ''
+    secrets:
+      npm-token:
+        description: Token for a private npm registry (exposed to installs as NODE_AUTH_TOKEN).
+        required: false
+      bridge-github-token:
+        description: Only when not using the Bridge GitHub App. A token that can push branches and open PRs.
+        required: false
+
+permissions: {}
+
+concurrency:
+  group: bridge-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  update:
+    name: Update and validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ inputs.node-version-file == '' && inputs.node-version || '' }}
+          node-version-file: ${{ inputs.node-version-file }}
+          registry-url: ${{ inputs.registry-url }}
+          scope: ${{ inputs.registry-scope }}
+
+      - name: Enable Corepack (pnpm/yarn projects)
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          if grep -q '"packageManager"' package.json 2>/dev/null; then
+            command -v corepack >/dev/null 2>&1 || npm install -g corepack@latest
+            corepack enable
+          fi
+
+      - name: Install requested npm version
+        if: inputs.npm-version != ''
+        env:
+          NPM_VERSION: ${{ inputs.npm-version }}
+        run: npm install -g "npm@${NPM_VERSION}"
+
+      - name: Bridge update
+        uses: cmccoy02/bridge-cli@main
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.npm-token }}
+          NPM_TOKEN: ${{ secrets.npm-token }}
+        with:
+          mode: update
+          working-directory: ${{ inputs.working-directory }}
+          handoff-dir: ${{ runner.temp }}/bridge-handoff
+          api-url: ${{ inputs.api-url }}
+          args: ${{ inputs.args }}
+
+      - name: Hand off to publish job
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bridge-handoff
+          path: ${{ runner.temp }}/bridge-handoff
+          include-hidden-files: true
+          retention-days: 3
+          if-no-files-found: warn
+
+  publish:
+    name: Publish pull request
+    needs: update
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - name: Download handoff bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: bridge-handoff
+          path: ${{ runner.temp }}/bridge-handoff
+
+      - name: Bridge publish
+        uses: cmccoy02/bridge-cli@main
+        env:
+          BRIDGE_GITHUB_TOKEN: ${{ secrets.bridge-github-token }}
+        with:
+          mode: publish
+          working-directory: ${{ inputs.working-directory }}
+          handoff-dir: ${{ runner.temp }}/bridge-handoff
+          api-url: ${{ inputs.api-url }}
