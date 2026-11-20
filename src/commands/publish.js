@@ -12,6 +12,7 @@ import {
 import { runCommand } from '../core/executor.js';
 import {
   checkDependencyFileChange,
+  HANDOFF_FINAL_REPORT_FILE,
   HandoffError,
   readHandoffBundle,
   validateBranchName
@@ -149,6 +150,18 @@ export async function publishCommand({
           ...(report.outcome || {}),
           failure: { message: `Publish failed: ${publish.message}` }
         };
+      }
+
+      // Write the final report (with the publish section) next to the bundle so the
+      // workflow can upload it even when the console upload is skipped or fails.
+      try {
+        await fs.writeFile(
+          path.join(path.resolve(handoffDir || ''), HANDOFF_FINAL_REPORT_FILE),
+          `${JSON.stringify(report, null, 2)}\n`,
+          'utf8'
+        );
+      } catch (writeError) {
+        warn(`Could not write ${HANDOFF_FINAL_REPORT_FILE}: ${writeError.message}`);
       }
 
       upload = await uploadReport(settings, report, { fetchImpl });

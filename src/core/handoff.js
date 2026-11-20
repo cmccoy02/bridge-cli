@@ -12,6 +12,9 @@ import { DEPENDENCY_ARTIFACT_BASENAMES } from '../constants.js';
 export const HANDOFF_SCHEMA = 'bridge-handoff.v1';
 export const HANDOFF_FILE = 'handoff.json';
 export const HANDOFF_REPORT_FILE = 'bridge-report.v1.json';
+// The update job writes HANDOFF_REPORT_FILE; `bridge publish` writes the final report
+// (with the `publish` section) here so the workflow can upload the complete record.
+export const HANDOFF_FINAL_REPORT_FILE = 'bridge-report.final.json';
 export const HANDOFF_FILES_DIR = 'files';
 export const HANDOFF_STATUSES = new Set(['ready', 'up_to_date', 'blocked', 'failed']);
 

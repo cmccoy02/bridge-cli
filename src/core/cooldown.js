@@ -21,6 +21,13 @@ const NATIVE_MIN_VERSIONS = {
   yarn: '4.10.0'
 };
 
+// Package managers that can resolve "as if a given date" with an absolute cutoff.
+// npm's `before` and uv's `UV_EXCLUDE_NEWER` are documented and reliable. pnpm and
+// Yarn read npm-style config, so Bridge passes `before` to them too, but that support
+// is best-effort: the proving ground verifies whether it actually time-travels. Any
+// manager not listed here records asOfSupported:false and runs live.
+const AS_OF_BEFORE_MANAGERS = new Set(['npm', 'pnpm', 'yarn']);
+
 export function ecosystemForLockfileFormat(format) {
   switch (format) {
     case 'json-npm':
@@ -132,6 +139,7 @@ export async function resolveNativeCooldown({
   rootDir = scopeDir,
   env = process.env,
   enabled = true,
+  asOf = null,
   versionFn = detectManagerVersion
 } = {}) {
   const manager = String(packageManager || '').trim();
@@ -142,9 +150,48 @@ export async function resolveNativeCooldown({
     setting: '',
     value: '',
     reason: '',
-    env: {}
+    env: {},
+    asOf: null,
+    asOfSupported: false
   };
   const directories = [...new Set([scopeDir, rootDir].filter(Boolean))];
+
+  // Time machine: resolve dependencies as if today were `asOf`. This overrides the
+  // relative release-age settings (min-release-age / minimumReleaseAge), because an
+  // absolute cutoff is what simulates a past run. For npm/pnpm/Yarn the cutoff folds
+  // in the cooldown (before = asOf - cooldownDays); npm rejects `before` combined with
+  // `min-release-age`, so only one is ever set. uv uses its own exclude-newer at the
+  // exact asOf date and lets the post-update check (now = asOf) enforce the cooldown.
+  const asOfMs = asOf ? Date.parse(asOf) : NaN;
+
+  if (asOf && Number.isFinite(asOfMs)) {
+    const asOfIso = new Date(asOfMs).toISOString();
+    native.asOf = asOfIso;
+
+    if (AS_OF_BEFORE_MANAGERS.has(manager)) {
+      const beforeIso = new Date(asOfMs - Math.max(0, days) * DAY_MS).toISOString();
+      native.applied = true;
+      native.asOfSupported = true;
+      native.setting = 'before';
+      native.value = beforeIso;
+      native.env = { npm_config_before: beforeIso };
+      native.reason =
+        `time machine: ${manager} resolves versions published on or before ${beforeIso.slice(0, 10)} ` +
+        `(as-of ${asOfIso.slice(0, 10)} minus ${days}-day cooldown)`;
+    } else if (manager === 'uv') {
+      native.applied = true;
+      native.asOfSupported = true;
+      native.setting = 'exclude-newer';
+      native.value = asOfIso;
+      native.env = { UV_EXCLUDE_NEWER: asOfIso };
+      native.reason = `time machine: uv excludes releases newer than ${asOfIso.slice(0, 10)}`;
+    } else {
+      native.asOfSupported = false;
+      native.reason = `${manager || 'this package manager'} has no as-of (before) mechanism; running live at ${asOfIso.slice(0, 10)}`;
+    }
+
+    return native;
+  }
 
   if (!(days > 0)) {
     native.reason = 'cooldown is off (cooldownDays is 0)';

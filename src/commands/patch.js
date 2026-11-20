@@ -181,6 +181,19 @@ function getDateStamp(date = new Date()) {
   return `${year}-${month}-${day}-${hours}${minutes}`;
 }
 
+// Experiment metadata is injected by the proving-ground (or any CI) workflow so a
+// run report can be traced back to the experiment and fixture that produced it.
+function resolveExperimentMetadata(env = process.env) {
+  const id = String(env.BRIDGE_EXPERIMENT_ID || '').trim();
+  const fixtureId = String(env.BRIDGE_FIXTURE_ID || '').trim();
+
+  if (!id && !fixtureId) {
+    return null;
+  }
+
+  return { id, fixtureId };
+}
+
 function formatDuration(ms) {
   if (!Number.isFinite(ms) || ms < 0) {
     return '0ms';
@@ -681,9 +694,10 @@ async function runVisualizer({
 
 // Lifecycle: baseline lockfile + install → beforeScripts → update/candidate
 // install → afterScripts → gate (NEW failures only). See SCOPE_WORKFLOW_PHASE_ORDER.
-async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false }) {
+async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false, asOf = null }) {
   const relativePath = normalizeScopePath(scope.path);
   const label = scopeLabel(relativePath);
+  const asOfMs = asOf ? Date.parse(asOf) : NaN;
   const lexicalScopeDir = resolvePathInside(tempDir, relativePath);
 
   if (!(await fileExists(lexicalScopeDir))) {
@@ -954,10 +968,14 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
     packageManager: scope.packageManager,
     days: scope.cooldownDays,
     enabled: scope.cooldownNative !== false,
+    asOf,
     scopeDir,
     rootDir: tempDir
   });
 
+  if (asOf) {
+    info(`Time machine (${label}): running as of ${asOf}; ${nativeCooldown.reason}`);
+  }
   if (scope.cooldownDays > 0) {
     info(`Release-age cooldown (${label}): ${scope.cooldownDays} day(s); ${nativeCooldown.reason}`);
   }
@@ -1280,7 +1298,8 @@ async function runScopeWorkflow({ run, tempDir, scope, repoName, verbose = false
             lockfileFormat,
             days: scope.cooldownDays,
             exclude: scope.cooldownExclude,
-            label
+            label,
+            now: Number.isFinite(asOfMs) ? asOfMs : Date.now()
           });
           scopeCooldown.native = nativeCooldown;
 
@@ -1586,13 +1605,15 @@ export async function patchCommand({
   runBeforeScripts = false,
   scope: requestedScope = '',
   localPackages: localPackageArguments = [],
-  handoffDir = ''
+  handoffDir = '',
+  asOf = ''
 } = {}) {
   let config;
   let configPath = '';
   const run = makeRunContext('patch', cwd);
   const resolvedHandoffDir = handoffDir ? path.resolve(cwd, handoffDir) : '';
   const cloudSettings = resolveCloudSettings();
+  const experiment = resolveExperimentMetadata();
 
   if (keepWorkspace && !dryRun) {
     error('--keep-workspace is only available with --dry-run.');
@@ -1602,6 +1623,18 @@ export async function patchCommand({
   if (resolvedHandoffDir && dryRun) {
     error('--handoff cannot be combined with --dry-run.');
     return false;
+  }
+
+  let asOfIso = '';
+  if (asOf) {
+    const asOfMs = Date.parse(asOf);
+
+    if (!Number.isFinite(asOfMs)) {
+      error(`--as-of must be an ISO date (e.g. 2025-06-01). Received: ${asOf}`);
+      return false;
+    }
+
+    asOfIso = new Date(asOfMs).toISOString();
   }
 
   try {
@@ -1647,6 +1680,12 @@ export async function patchCommand({
     }`
   );
   info(`Scope: ${requestedScope ? scopeLabel(normalizeScopePath(requestedScope)) : 'all'}`);
+  if (asOfIso) {
+    info(`As-of: ${asOfIso} (time machine)`);
+  }
+  if (experiment) {
+    info(`Experiment: ${experiment.id || '(none)'}${experiment.fixtureId ? ` | fixture ${experiment.fixtureId}` : ''}`);
+  }
   info(`Command output: ${verbose ? 'streaming' : 'condensed'}`);
   info(
     `Before-scripts: ${
@@ -1802,7 +1841,9 @@ export async function patchCommand({
         dependencyDeltas,
         cooldownResults,
         repository: repositoryInfo,
-        ci: ciEnvironment
+        ci: ciEnvironment,
+        asOf: asOfIso,
+        experiment
       });
       runReportPath = savedReport.reportPath;
       warn(`Run cancelled (${signal}). Partial report: ${runReportPath}`);
@@ -1928,7 +1969,8 @@ export async function patchCommand({
         tempDir,
         scope,
         repoName,
-        verbose
+        verbose,
+        asOf: asOfIso
       });
       depDeltaSummary = mergeDepDeltaSummaries(
         depDeltaSummary,
@@ -2493,7 +2535,9 @@ export async function patchCommand({
         dependencyDeltas,
         cooldownResults,
         repository: repositoryInfo,
-        ci: ciEnvironment
+        ci: ciEnvironment,
+        asOf: asOfIso,
+        experiment
       });
       runReportPath = savedReport.reportPath;
 
