@@ -22,7 +22,7 @@
   "scripts": {
     "start": "node ./bin/bridge.js",
     "smoke": "node ./bin/bridge.js --help",
-    "test": "node --import ./scripts/setup-bridge-home.js --test",
+    "test": "node --import ./scripts/setup-bridge-home.js --test 'test/**/*.test.js'",
     "prepack": "node ./scripts/write-build-info.js",
     "postpack": "node ./scripts/write-build-info.js --clean"
   },

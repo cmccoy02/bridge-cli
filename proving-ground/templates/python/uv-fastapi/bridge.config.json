@@ -1,0 +1,9 @@
+{
+  "packageManager": "uv",
+  "installCommand": "uv sync",
+  "updateCommand": "uv lock --upgrade",
+  "cleanCommands": [],
+  "beforeScripts": ["uv run pytest -q"],
+  "afterScripts": ["uv run pytest -q"],
+  "allowMajorUpdates": false
+}

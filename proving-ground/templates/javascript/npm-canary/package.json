@@ -1,0 +1,12 @@
+{
+  "name": "pg-canary-svc",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "dependencies": {
+    "@pg/canary": "^1.0.0",
+    "@pg/semver-lie": "^1.2.0"
+  }
+}

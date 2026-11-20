@@ -1,0 +1,9 @@
+{
+  "packageManager": "pipenv",
+  "installCommand": "pipenv install --dev",
+  "updateCommand": "pipenv update",
+  "cleanCommands": [],
+  "beforeScripts": ["pipenv run python manage.py test"],
+  "afterScripts": ["pipenv run python manage.py test"],
+  "allowMajorUpdates": false
+}

@@ -1,0 +1,9 @@
+{
+  "name": "@pgw/core",
+  "version": "0.1.0",
+  "private": true,
+  "main": "index.js",
+  "dependencies": {
+    "@pg/fresh": "^2.0.0"
+  }
+}

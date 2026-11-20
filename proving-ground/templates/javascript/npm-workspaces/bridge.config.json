@@ -1,0 +1,9 @@
+{
+  "packageManager": "npm",
+  "installCommand": "npm ci",
+  "updateCommand": "npm update",
+  "cleanCommands": ["rm -rf node_modules packages/*/node_modules"],
+  "beforeScripts": ["npm test"],
+  "afterScripts": ["npm test"],
+  "allowMajorUpdates": false
+}

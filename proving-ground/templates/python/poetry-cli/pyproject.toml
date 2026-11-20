@@ -1,0 +1,19 @@
+[tool.poetry]
+name = "pg-poetry-cli"
+version = "0.1.0"
+description = "Proving-ground fixture: a small click CLI."
+authors = ["Proving Ground <pg@example.com>"]
+packages = [{ include = "pg_cli" }]
+
+[tool.poetry.dependencies]
+python = "^3.12"
+click = "^8.1"
+rich = "^13.7"
+requests = "^2.31"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

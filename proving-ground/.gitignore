@@ -1,0 +1,4 @@
+# Generator output (fleet repo trees are generated, never committed here).
+.generated/
+# Local data pulled for analysis.
+.data/

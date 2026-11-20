@@ -1,0 +1,9 @@
+{
+  "packageManager": "pip-compile",
+  "installCommand": "pip-sync requirements.txt",
+  "updateCommand": "pip-compile --upgrade requirements.in",
+  "cleanCommands": [],
+  "beforeScripts": ["pytest -q"],
+  "afterScripts": ["pytest -q"],
+  "allowMajorUpdates": false
+}
