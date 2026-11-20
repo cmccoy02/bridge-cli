@@ -4,6 +4,7 @@ import { Command } from 'commander';
 
 import { configCommand } from '../src/commands/config.js';
 import { initCommand } from '../src/commands/init.js';
+import { notifyTestCommand } from '../src/commands/notify.js';
 import { patchCommand } from '../src/commands/patch.js';
 import { publishCommand } from '../src/commands/publish.js';
 import { reportCommand } from '../src/commands/report.js';
@@ -126,6 +127,18 @@ program
   .option('--offline', 'Skip repository reachability check')
   .action(async (options) => {
     const ok = await validateCommand({ offline: options.offline });
+    if (!ok) {
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command('notify')
+  .description('Send or inspect Bridge notifications')
+  .command('test')
+  .description('Send a sample notification to every configured channel')
+  .action(async () => {
+    const ok = await notifyTestCommand();
     if (!ok) {
       process.exitCode = 1;
     }

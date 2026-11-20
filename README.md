@@ -201,10 +201,17 @@ The local-pilot setup check. It performs the same config and tool checks as
 - package is declared by the target project;
 - local copy contains no `.git` metadata;
 - package version and resolved location are displayed before a run starts.
+- Slack: `configured` / `not configured` / `last send failed` (the webhook URL is never printed)
 
 ```bash
 bridge doctor --local-package @travelpass/design-system=../travelpass-design-system-master
 ```
+
+### `bridge notify test`
+
+Sends a sample `bridge-notify.v1` event to every configured channel (terminal
+card, Slack incoming webhook if set, local macOS/command hook). Prints
+per-channel `ok` / `fail` and never prints the webhook URL.
 
 ### `bridge report --latest`
 
@@ -234,6 +241,36 @@ bridge schedule latest
 
 Scheduled runs keep `--skip-before-scripts` on. `schedule run` can start two
 repos at once; the same repo is still locked so branches/PRs cannot clash.
+
+## Get pinged
+
+Every `bridge patch` ends with a boxed **Bridge result** card: outcome, PR
+link, package counts, security delta, and the report path. Slack is optional
+and is **not** read from `bridge.config.json`.
+
+Default pings: `pr_created`, `pr_updated`, `blocked`, `error`.
+`no_updates` and `pr_reused` are a demo heartbeat and stay **off** until you
+add them to `notifications.on`.
+
+```json
+{
+  "notifications": {
+    "on": ["pr_created", "pr_updated", "blocked", "error"],
+    "slack": { "webhookUrl": "https://hooks.slack.com/services/T.../B.../..." }
+  }
+}
+```
+
+Save as `~/.bridge/settings.json` and `chmod 600` it, or:
+
+```bash
+export BRIDGE_SLACK_WEBHOOK_URL='https://hooks.slack.com/services/T.../B.../...'
+bridge notify test
+bridge doctor
+```
+
+`bridge schedule run` sends **one** Slack digest (one line per repo). Per-repo
+runs inside a batch stay silent. Setup: [`docs/notifications.md`](docs/notifications.md).
 
 ### Logs as signal
 
@@ -745,7 +782,8 @@ Both skip before-scripts by default. Both write
 `~/.bridge/schedule/LATEST.md` (sample: `docs/daily-summary.sample.md`). Optional
 local notify: `--notify` or `BRIDGE_NOTIFY_COMMAND` (macOS `osascript` if unset
 on Darwin). A `bridge schedule run` batch sends one notification for the whole
-batch, not one per repo. No external services.
+batch, not one per repo — including one Slack digest when a webhook is
+configured. See [`docs/notifications.md`](docs/notifications.md).
 
 `scripts/bridge-daily.sh` is a lockfile-guarded wrapper: fetch/pull (or clone) a target repo, run `bridge patch` with the after-script suite, copy **this run's** `bridge-summary.md` to a dated folder. No daemon, no cloud scheduler, no extra npm dependencies. It exits `2` if another run holds the lock, `3` on usage errors, and Bridge's own non-zero status on a failed patch. It never force-pushes a PR; the normal gates still apply.
 

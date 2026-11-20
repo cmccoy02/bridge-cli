@@ -5,6 +5,8 @@ import { getBridgeHome } from './bridgeHome.js';
 
 export const SETTINGS_FILE_NAME = 'settings.json';
 
+export const DEFAULT_NOTIFY_ON = ['pr_created', 'pr_updated', 'blocked', 'error'];
+
 export const DEFAULT_SETTINGS = {
   retention: {
     maxAgeDays: 30,
@@ -13,7 +15,13 @@ export const DEFAULT_SETTINGS = {
   },
   concurrency: 2,
   notify: false,
-  notifyCommand: ''
+  notifyCommand: '',
+  notifications: {
+    on: [...DEFAULT_NOTIFY_ON],
+    slack: {
+      webhookUrl: ''
+    }
+  }
 };
 
 function toPositiveInt(value, fallback) {
@@ -41,6 +49,21 @@ function toBoolean(value, fallback) {
   return fallback;
 }
 
+function mergeNotifications(base = DEFAULT_SETTINGS.notifications, override = {}) {
+  const source = override && typeof override === 'object' ? override : {};
+  return {
+    on: Array.isArray(source.on)
+      ? [...new Set(source.on.map((value) => String(value)))]
+      : [...(base.on || DEFAULT_NOTIFY_ON)],
+    slack: {
+      webhookUrl:
+        typeof source.slack?.webhookUrl === 'string'
+          ? source.slack.webhookUrl.trim()
+          : base.slack?.webhookUrl || ''
+    }
+  };
+}
+
 function mergeSettings(base, override = {}) {
   return {
     ...base,
@@ -48,7 +71,8 @@ function mergeSettings(base, override = {}) {
     retention: {
       ...base.retention,
       ...(override.retention || {})
-    }
+    },
+    notifications: mergeNotifications(base.notifications, override.notifications)
   };
 }
 
@@ -88,9 +112,18 @@ export function applyEnvOverrides(settings, env = process.env) {
     );
   }
 
+  const notifications = mergeNotifications(next.notifications, next.notifications);
+  if (typeof env.BRIDGE_SLACK_WEBHOOK_URL === 'string' && env.BRIDGE_SLACK_WEBHOOK_URL.trim()) {
+    notifications.slack = {
+      ...notifications.slack,
+      webhookUrl: env.BRIDGE_SLACK_WEBHOOK_URL.trim()
+    };
+  }
+
   return {
     ...next,
     retention,
+    notifications,
     concurrency: toPositiveInt(env.BRIDGE_CONCURRENCY, next.concurrency),
     notify: toBoolean(env.BRIDGE_NOTIFY, next.notify),
     notifyCommand:
@@ -98,6 +131,30 @@ export function applyEnvOverrides(settings, env = process.env) {
         ? env.BRIDGE_NOTIFY_COMMAND.trim()
         : next.notifyCommand || ''
   };
+}
+
+export async function inspectSettingsPermissions(bridgeHome = getBridgeHome()) {
+  try {
+    const filePath = getSettingsPath(bridgeHome);
+    const stat = await fs.stat(filePath);
+    const mode = stat.mode & 0o777;
+    const tooOpen = (stat.mode & 0o077) !== 0;
+    return {
+      exists: true,
+      path: filePath,
+      mode,
+      tooOpen,
+      warning: tooOpen
+        ? `${filePath} is readable by others (mode ${mode.toString(8).padStart(3, '0')}); chmod 600 recommended.`
+        : ''
+    };
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      return { exists: false, path: getSettingsPath(bridgeHome), mode: 0, tooOpen: false, warning: '' };
+    }
+
+    return { exists: false, path: getSettingsPath(bridgeHome), mode: 0, tooOpen: false, warning: '' };
+  }
 }
 
 export async function loadBridgeSettings({

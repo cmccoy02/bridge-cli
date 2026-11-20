@@ -46,6 +46,56 @@ export function buildNotifyPayload(summaryText = '', { title = 'Bridge' } = {}) 
   };
 }
 
+export function notifyPayloadFromEvent(event = {}, { title = 'Bridge' } = {}) {
+  const outcome = event.outcome || 'finished';
+  const repo = event.repo || '';
+  const pr = event.prUrl || '';
+  const body = [repo, outcome.replace(/_/g, ' '), pr].filter(Boolean).join(' · ');
+
+  return {
+    title,
+    body: body.slice(0, 180),
+    headline: repo || title
+  };
+}
+
+export async function sendLocalNotification({
+  title = 'Bridge',
+  body = '',
+  summaryPath = '',
+  summaryText = '',
+  notifyCommand,
+  bridgeHome,
+  env = process.env,
+  platform = process.platform
+} = {}) {
+  const settings = await loadBridgeSettings({ bridgeHome, env });
+  const command =
+    (typeof notifyCommand === 'string' && notifyCommand.trim()) ||
+    settings.notifyCommand ||
+    defaultNotifyCommand(platform);
+
+  if (!command) {
+    return { sent: false, reason: 'no_command', payload: { title, body } };
+  }
+
+  const result = await runDetached(command, {
+    env: {
+      ...env,
+      BRIDGE_NOTIFY_TITLE: title,
+      BRIDGE_NOTIFY_BODY: body,
+      BRIDGE_SUMMARY_PATH: summaryPath,
+      BRIDGE_SUMMARY_TEXT: summaryText
+    }
+  });
+
+  return {
+    sent: result.success === true,
+    command,
+    payload: { title, body }
+  };
+}
+
 export async function notifyDailySummary({
   summaryText = '',
   summaryPath = '',
@@ -64,28 +114,19 @@ export async function notifyDailySummary({
   }
 
   const payload = buildNotifyPayload(summaryText);
-  const command =
-    (typeof notifyCommand === 'string' && notifyCommand.trim()) ||
-    settings.notifyCommand ||
-    defaultNotifyCommand(platform);
-
-  if (!command) {
-    return { sent: false, reason: 'no_command', payload };
-  }
-
-  const result = await runDetached(command, {
-    env: {
-      ...env,
-      BRIDGE_NOTIFY_TITLE: payload.title,
-      BRIDGE_NOTIFY_BODY: payload.body,
-      BRIDGE_SUMMARY_PATH: summaryPath,
-      BRIDGE_SUMMARY_TEXT: summaryText
-    }
+  const result = await sendLocalNotification({
+    title: payload.title,
+    body: payload.body,
+    summaryPath,
+    summaryText,
+    notifyCommand,
+    bridgeHome,
+    env,
+    platform
   });
 
   return {
-    sent: result.success === true,
-    command,
+    ...result,
     payload
   };
 }

@@ -13,6 +13,8 @@ import {
   inspectNpmLocalPackage,
   parseLocalPackageArguments
 } from '../core/localPackages.js';
+import { inspectSettingsPermissions } from '../core/bridgeSettings.js';
+import { getSlackDoctorStatus } from '../core/notify/index.js';
 import { error, info, line, success, warn } from '../ui/logger.js';
 
 const RECOMMENDED_NPM_VERSION = '11.19.1';
@@ -364,5 +366,15 @@ export async function validateCommand({
 
 export async function doctorCommand(options = {}) {
   info('Bridge doctor checks configuration, local tools, repository access, and local package substitutions.');
+  try {
+    const slack = await getSlackDoctorStatus();
+    info(slack.line);
+    const permissions = await inspectSettingsPermissions();
+    if (permissions.warning) {
+      warn(permissions.warning);
+    }
+  } catch {
+    info('Slack: not configured');
+  }
   return validateCommand({ ...options, commandName: 'doctor' });
 }

@@ -504,6 +504,11 @@ export function normalizeConfig(config) {
     normalized.protectedBranches = normalizeArray(protectedBranches);
   }
 
+  // Slack webhooks live in ~/.bridge/settings.json or BRIDGE_SLACK_WEBHOOK_URL, never repo config.
+  delete normalized.notifications;
+  delete normalized.slack;
+  delete normalized.webhookUrl;
+
   return normalized;
 }
 
