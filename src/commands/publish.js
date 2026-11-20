@@ -267,7 +267,12 @@ export async function publishCommand({
     await git(
       `fetch --no-tags --depth=200 origin ${shellQuote(`+refs/heads/${defaultBranch}:refs/remotes/origin/${defaultBranch}`)}`
     );
-    await git(`fetch --no-tags --depth=1 origin ${baseSha}`);
+    const haveBase = await git(`cat-file -e ${baseSha}^{commit}`, { allowFailure: true });
+
+    if (!haveBase.success) {
+      await git(`fetch --no-tags --depth=1 origin ${baseSha}`);
+    }
+
     const onDefaultBranch = await git(
       `merge-base --is-ancestor ${baseSha} ${shellQuote(`refs/remotes/origin/${defaultBranch}`)}`,
       { allowFailure: true }
