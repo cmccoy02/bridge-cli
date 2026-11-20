@@ -4,6 +4,7 @@ import path from 'node:path';
 import { getActivityLogPath, getBridgeHome, getRunOperationsLogPath } from './activityLogger.js';
 import { AGENT_TELEMETRY_SCHEMA_VERSION, getAgentEventStreamPath } from './agentTelemetry.js';
 import { redactActivityPayload, redactSensitiveText } from './redaction.js';
+import { getBridgeVersion } from './bridgeVersion.js';
 import { buildRunSignal } from './runSignal.js';
 import { describeCiEnvironment } from './cloud.js';
 import { summarizeCooldownResults } from './cooldown.js';
@@ -607,7 +608,8 @@ export async function writeRunReport({
       startedAt: new Date(run.startedAtMs).toISOString(),
       finishedAt: finishedEvent?.at || new Date().toISOString(),
       durationMs: resolvedDurationMs,
-      pid: run.pid || process.pid
+      pid: run.pid || process.pid,
+      bridgeVersion: getBridgeVersion()
     },
     environment: resolvedEnvironment,
     repository: repository || null,

@@ -199,6 +199,7 @@ export function createEarlyExitReason(reason, details = {}) {
     audit_block: 'Blocked by security audit regression',
     bundle_block: 'Blocked by bundle size regression',
     validation_block: 'Blocked by validation script failure',
+    cooldown_block: 'Blocked by release-age cooldown (versions too new)',
     cancelled: 'Run cancelled by signal'
   };
 
