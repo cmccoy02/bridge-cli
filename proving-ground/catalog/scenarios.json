@@ -1,0 +1,64 @@
+{
+  "$comment": "Planted cases. Each fixture lists the ids it contains; the expected outcome is what Bridge must do on a run from the fixture's baseline. Planted packages are served only by the in-job mock registry (scope @pg).",
+  "scenarios": [
+    {
+      "id": "clean-drift",
+      "summary": "Only public dependencies, behind by the fixture's drift date.",
+      "expect": { "status": ["pr_opened", "pr_updated", "pr_unchanged", "up_to_date"], "gate": null },
+      "measures": "Baseline behavior: a mergeable PR, how long it takes, whether the repo's own CI passes on it."
+    },
+    {
+      "id": "semver-lie-caught",
+      "summary": "@pg/semver-lie 1.2.1 renames an exported function in a patch release; the fixture's tests call it.",
+      "packages": { "@pg/semver-lie": { "baseline": "1.2.0", "planted": "1.2.1", "plantedAgeHours": 240 } },
+      "expect": { "status": ["blocked"], "gate": "validation_block" },
+      "measures": "The checks gate catches a breaking patch when tests cover it."
+    },
+    {
+      "id": "semver-lie-uncaught",
+      "summary": "Same breaking patch, but no test exercises the renamed function.",
+      "packages": { "@pg/semver-lie": { "baseline": "1.2.0", "planted": "1.2.1", "plantedAgeHours": 240 } },
+      "expect": { "status": ["pr_opened"], "gate": null, "knownMiss": true },
+      "measures": "What Bridge misses when tests are weak. Expected to pass the gate; recorded as a known miss."
+    },
+    {
+      "id": "too-new-release",
+      "summary": "@pg/fresh 2.0.1 was published 2 hours before the run; 2.0.0 is 30 days old.",
+      "packages": { "@pg/fresh": { "baseline": "2.0.0", "planted": "2.0.1", "plantedAgeHours": 2 } },
+      "expect": { "status": ["pr_opened", "up_to_date", "blocked"], "gate": "cooldown_block", "mustNotContain": "@pg/fresh@2.0.1" },
+      "measures": "The release-age cooldown keeps a fresh release out of every PR (native setting picks 2.0.0, or the gate blocks)."
+    },
+    {
+      "id": "canary-postinstall",
+      "summary": "@pg/canary 1.0.1 adds a postinstall that records which token-like environment variables it can see.",
+      "packages": { "@pg/canary": { "baseline": "1.0.0", "planted": "1.0.1", "plantedAgeHours": 240 } },
+      "expect": { "status": ["pr_opened", "blocked", "up_to_date"], "gate": null, "honeytokenLeaks": 0 },
+      "measures": "Package scripts never see GitHub, Actions OIDC or Bridge credentials."
+    },
+    {
+      "id": "peer-conflict",
+      "summary": "@pg/peer-clash 3.1.0 adds a peerDependency the fixture cannot satisfy.",
+      "packages": { "@pg/peer-clash": { "baseline": "3.0.0", "planted": "3.1.0", "plantedAgeHours": 240 } },
+      "expect": { "status": ["blocked", "failed", "pr_opened"], "gate": null, "failureCategory": "peer-conflict" },
+      "measures": "Whether Bridge reports a peer conflict clearly or produces a broken lockfile."
+    },
+    {
+      "id": "baseline-failing",
+      "summary": "One of the fixture's checks already fails on the baseline commit.",
+      "expect": { "status": ["pr_opened", "up_to_date"], "gate": null },
+      "measures": "Pre-existing failures never block an update."
+    },
+    {
+      "id": "flaky-test",
+      "summary": "One test fails about 20% of the time regardless of dependencies.",
+      "expect": { "status": ["pr_opened", "up_to_date"], "gate": null },
+      "measures": "False holds caused by flakiness (expected to fail sometimes today; this is a gap finder)."
+    },
+    {
+      "id": "unsupported-ecosystem",
+      "summary": "A package manager Bridge does not support yet (Ruby Bundler, Go modules).",
+      "expect": { "status": ["failed"], "gate": null, "failureCategory": "unsupported" },
+      "measures": "Bridge fails clearly and fast instead of crashing or hanging."
+    }
+  ]
+}

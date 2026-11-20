@@ -1,0 +1,69 @@
+# Proving ground: daily run. Resets the reset-mode fixtures to baseline, then
+# dispatches each fixture's Bridge workflow. Schedule + dispatch only, so secrets are
+# never reachable from a fork PR.
+name: PG Run
+
+on:
+  schedule:
+    - cron: '17 9 * * *' # config.dailyRunUtc 09:17
+  workflow_dispatch:
+    inputs:
+      experiment_id:
+        description: Experiment id (blank = daily-YYYY-MM-DD).
+        type: string
+        default: ''
+      bridge_ref:
+        description: cmccoy02/bridge-cli ref to run the CLI from (blank = pinned action).
+        type: string
+        default: ''
+      as_of:
+        description: Time machine - run as if today were this ISO date.
+        type: string
+        default: ''
+      fixtures:
+        description: Comma-separated fixture ids (blank = all).
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pg-run
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ secrets.FLEET_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      - name: Reset reset-mode fixtures to baseline
+        env:
+          PG_FIXTURES: ${{ inputs.fixtures }}
+        run: |
+          args=""
+          [ -n "$PG_FIXTURES" ] && args="--fixtures $PG_FIXTURES"
+          # shellcheck disable=SC2086
+          node proving-ground/scripts/reset.mjs $args
+
+      - name: Dispatch Bridge runs
+        env:
+          PG_EXPERIMENT: ${{ inputs.experiment_id }}
+          PG_BRIDGE_REF: ${{ inputs.bridge_ref }}
+          PG_AS_OF: ${{ inputs.as_of }}
+          PG_FIXTURES: ${{ inputs.fixtures }}
+        run: |
+          args=""
+          [ -n "$PG_EXPERIMENT" ] && args="$args --experiment-id $PG_EXPERIMENT"
+          [ -n "$PG_BRIDGE_REF" ] && args="$args --bridge-ref $PG_BRIDGE_REF"
+          [ -n "$PG_AS_OF" ] && args="$args --as-of $PG_AS_OF"
+          [ -n "$PG_FIXTURES" ] && args="$args --fixtures $PG_FIXTURES"
+          # shellcheck disable=SC2086
+          node proving-ground/scripts/dispatch.mjs $args

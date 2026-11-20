@@ -1,0 +1,14 @@
+{
+  "id": "ts-yarn-lib",
+  "tier": "synthetic",
+  "ecosystem": "typescript",
+  "manager": "yarn-berry",
+  "template": "typescript/yarn-lib",
+  "size": "S",
+  "driftDate": "2026-05-20",
+  "mode": "reset",
+  "scenarios": ["semver-lie-caught"],
+  "languageVersions": { "node": "22" },
+  "usesMockRegistry": true,
+  "notes": "TS library, tsc + node:test. Depends on @pg/semver-lie; a test calls the renamed export, so the checks gate must catch the breaking patch."
+}

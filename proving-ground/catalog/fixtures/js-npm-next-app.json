@@ -1,0 +1,13 @@
+{
+  "id": "js-npm-next-app",
+  "tier": "synthetic",
+  "ecosystem": "javascript",
+  "manager": "npm",
+  "template": "javascript/npm-next-app",
+  "size": "L",
+  "driftDate": "2025-05-20",
+  "mode": "steady",
+  "scenarios": ["clean-drift"],
+  "languageVersions": { "node": "22" },
+  "notes": "Next.js app; next build is the check. Large tree, 18 months of drift."
+}

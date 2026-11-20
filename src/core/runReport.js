@@ -555,7 +555,9 @@ export async function writeRunReport({
   dependencyDeltas = [],
   cooldownResults = [],
   repository = null,
-  ci = null
+  ci = null,
+  asOf = '',
+  experiment = null
 } = {}) {
   const events = await readRunEvents(run.runId);
   const finishedEvent = [...events].reverse().find((event) => event.event === 'run_finished');
@@ -609,8 +611,12 @@ export async function writeRunReport({
       finishedAt: finishedEvent?.at || new Date().toISOString(),
       durationMs: resolvedDurationMs,
       pid: run.pid || process.pid,
-      bridgeVersion: getBridgeVersion()
+      bridgeVersion: getBridgeVersion(),
+      ...(asOf ? { asOf } : {})
     },
+    ...(experiment && (experiment.id || experiment.fixtureId)
+      ? { experiment: { id: experiment.id || '', fixtureId: experiment.fixtureId || '' } }
+      : {}),
     environment: resolvedEnvironment,
     repository: repository || null,
     ci: ci || describeCiEnvironment(),

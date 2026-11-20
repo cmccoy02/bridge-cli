@@ -70,6 +70,10 @@ program
     '--handoff <dir>',
     'CI mode: validate the update but do not push; write a bundle for `bridge publish`'
   )
+  .option(
+    '--as-of <iso-date>',
+    'Time machine: resolve dependencies as if today were this ISO date (npm/pnpm/yarn use before; uv uses exclude-newer)'
+  )
   .action(async (options) => {
     const ok = await patchCommand({
       handoffDir: options.handoff,
@@ -80,7 +84,8 @@ program
       skipBeforeScripts: options.skipBeforeScripts,
       runBeforeScripts: options.runBeforeScripts,
       scope: options.scope,
-      localPackages: options.localPackage
+      localPackages: options.localPackage,
+      asOf: options.asOf
     });
     if (!ok) {
       process.exitCode = 1;

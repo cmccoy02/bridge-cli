@@ -1,0 +1,73 @@
+# Proving ground: provision the fleet. Dispatch only (never a fork PR path): it uses
+# FLEET_TOKEN to create/update the data repo and every fixture repo from the catalog,
+# and to set the FLEET_BOT_TOKEN org secret. Idempotent.
+name: PG Provision
+
+on:
+  workflow_dispatch:
+    inputs:
+      fixture:
+        description: Only provision this fixture id (blank = all).
+        type: string
+        default: ''
+      skip_lock:
+        description: Skip dependency locking (faster; fixtures will not start behind).
+        type: boolean
+        default: false
+      data_only:
+        description: Only the data repo + org secret.
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pg-provision
+  cancel-in-progress: false
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ secrets.FLEET_TOKEN }}
+      FLEET_TOKEN: ${{ secrets.FLEET_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - name: Enable Corepack (pnpm/yarn)
+        run: corepack enable
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Python package managers
+        run: python -m pip install --upgrade pip uv poetry pipenv pip-tools
+
+      - name: Set up Elixir/OTP
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: '27'
+          elixir-version: '1.17'
+
+      - name: Configure git auth
+        run: gh auth setup-git
+
+      - name: Provision
+        env:
+          PG_FIXTURE: ${{ inputs.fixture }}
+          PG_SKIP_LOCK: ${{ inputs.skip_lock }}
+          PG_DATA_ONLY: ${{ inputs.data_only }}
+        run: |
+          args=""
+          [ -n "$PG_FIXTURE" ] && args="$args --fixture $PG_FIXTURE"
+          [ "$PG_SKIP_LOCK" = "true" ] && args="$args --skip-lock"
+          [ "$PG_DATA_ONLY" = "true" ] && args="$args --data-only"
+          # shellcheck disable=SC2086
+          node proving-ground/scripts/provision.mjs $args

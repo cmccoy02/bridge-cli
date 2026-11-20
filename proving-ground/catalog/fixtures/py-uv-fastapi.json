@@ -1,0 +1,13 @@
+{
+  "id": "py-uv-fastapi",
+  "tier": "synthetic",
+  "ecosystem": "python",
+  "manager": "uv",
+  "template": "python/uv-fastapi",
+  "size": "S",
+  "driftDate": "2026-05-20",
+  "mode": "reset",
+  "scenarios": ["clean-drift"],
+  "languageVersions": { "python": "3.12" },
+  "notes": "FastAPI + httpx + pydantic, pytest. uv lock --exclude-newer pins to the drift date."
+}

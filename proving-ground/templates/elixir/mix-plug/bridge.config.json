@@ -1,0 +1,9 @@
+{
+  "packageManager": "mix",
+  "installCommand": "mix deps.get",
+  "updateCommand": "mix deps.update --all",
+  "cleanCommands": ["rm -rf _build"],
+  "beforeScripts": ["mix test"],
+  "afterScripts": ["mix test"],
+  "allowMajorUpdates": false
+}

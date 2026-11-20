@@ -1,0 +1,9 @@
+{
+  "packageManager": "npm",
+  "installCommand": "npm ci",
+  "updateCommand": "npm update",
+  "cleanCommands": ["rm -rf node_modules .next"],
+  "beforeScripts": ["npm run build"],
+  "afterScripts": ["npm run build"],
+  "allowMajorUpdates": false
+}

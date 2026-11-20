@@ -1,0 +1,48 @@
+# Proving ground: collect finished runs into run records on the data repo. Hourly.
+name: PG Collect
+
+on:
+  schedule:
+    - cron: '0 * * * *' # hourly
+  workflow_dispatch:
+    inputs:
+      fixtures:
+        description: Comma-separated fixture ids (blank = all).
+        type: string
+        default: ''
+      limit:
+        description: How many recent runs per fixture to scan.
+        type: string
+        default: '20'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pg-collect
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ secrets.FLEET_TOKEN }}
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - name: Configure git auth
+        run: gh auth setup-git
+      - name: Collect
+        env:
+          PG_FIXTURES: ${{ inputs.fixtures }}
+          PG_LIMIT: ${{ inputs.limit }}
+        run: |
+          args=""
+          [ -n "$PG_FIXTURES" ] && args="$args --fixtures $PG_FIXTURES"
+          [ -n "$PG_LIMIT" ] && args="$args --limit $PG_LIMIT"
+          # shellcheck disable=SC2086
+          node proving-ground/scripts/collect.mjs $args

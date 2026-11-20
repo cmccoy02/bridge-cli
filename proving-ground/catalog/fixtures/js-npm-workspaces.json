@@ -1,0 +1,14 @@
+{
+  "id": "js-npm-workspaces",
+  "tier": "synthetic",
+  "ecosystem": "javascript",
+  "manager": "npm",
+  "template": "javascript/npm-workspaces",
+  "size": "M",
+  "driftDate": "2026-05-20",
+  "mode": "reset",
+  "scenarios": ["too-new-release"],
+  "languageVersions": { "node": "22" },
+  "usesMockRegistry": true,
+  "notes": "npm workspaces (3 packages). Depends on @pg/fresh; the release-age cooldown must keep 2.0.1 out of the PR."
+}

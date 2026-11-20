@@ -1,0 +1,10 @@
+{
+  "name": "@pg/peer-clash",
+  "version": "3.1.0",
+  "description": "Planted: adds a peerDependency on @pg/peer-host that no fixture can satisfy.",
+  "main": "index.js",
+  "peerDependencies": {
+    "@pg/peer-host": "^99.0.0"
+  },
+  "license": "MIT"
+}

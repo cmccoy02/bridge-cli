@@ -1,0 +1,13 @@
+{
+  "id": "py-poetry-cli",
+  "tier": "synthetic",
+  "ecosystem": "python",
+  "manager": "poetry",
+  "template": "python/poetry-cli",
+  "size": "M",
+  "driftDate": "2025-11-20",
+  "mode": "steady",
+  "scenarios": ["clean-drift"],
+  "languageVersions": { "python": "3.12" },
+  "notes": "click + rich + requests CLI, pytest. Poetry lock pins the baseline."
+}

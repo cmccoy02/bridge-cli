@@ -1,0 +1,13 @@
+{
+  "id": "py-pipenv-django",
+  "tier": "synthetic",
+  "ecosystem": "python",
+  "manager": "pipenv",
+  "template": "python/pipenv-django",
+  "size": "M",
+  "driftDate": "2025-11-20",
+  "mode": "steady",
+  "scenarios": ["clean-drift"],
+  "languageVersions": { "python": "3.12" },
+  "notes": "Django, manage.py test. Pipfile.lock pins the baseline."
+}

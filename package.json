@@ -22,7 +22,14 @@
   "scripts": {
     "start": "node ./bin/bridge.js",
     "smoke": "node ./bin/bridge.js --help",
-    "test": "node --import ./scripts/setup-bridge-home.js --test",
+    "test": "node --import ./scripts/setup-bridge-home.js --test 'test/**/*.test.js'",
+    "pg:generate": "node proving-ground/scripts/generate.mjs",
+    "pg:provision": "node proving-ground/scripts/provision.mjs",
+    "pg:reset": "node proving-ground/scripts/reset.mjs",
+    "pg:dispatch": "node proving-ground/scripts/dispatch.mjs",
+    "pg:collect": "node proving-ground/scripts/collect.mjs",
+    "pg:score": "node proving-ground/scripts/score.mjs",
+    "pg:pull": "node proving-ground/scripts/pull-data.mjs",
     "prepack": "node ./scripts/write-build-info.js",
     "postpack": "node ./scripts/write-build-info.js --clean"
   },

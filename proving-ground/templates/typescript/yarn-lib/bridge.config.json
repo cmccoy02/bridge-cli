@@ -1,0 +1,9 @@
+{
+  "packageManager": "yarn",
+  "installCommand": "yarn install --immutable",
+  "updateCommand": "yarn up \"@pg/semver-lie\"",
+  "cleanCommands": ["rm -rf node_modules .yarn/cache dist"],
+  "beforeScripts": ["yarn build", "yarn test"],
+  "afterScripts": ["yarn build", "yarn test"],
+  "allowMajorUpdates": false
+}

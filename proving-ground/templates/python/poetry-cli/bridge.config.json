@@ -1,0 +1,9 @@
+{
+  "packageManager": "poetry",
+  "installCommand": "poetry install --no-interaction",
+  "updateCommand": "poetry update --lock --no-interaction",
+  "cleanCommands": [],
+  "beforeScripts": ["poetry run pytest -q"],
+  "afterScripts": ["poetry run pytest -q"],
+  "allowMajorUpdates": false
+}

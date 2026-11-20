@@ -1,0 +1,7 @@
+{
+  "name": "@pg/semver-lie",
+  "version": "1.2.1",
+  "description": "Planted: patch release that renames greet() to salutation(). A breaking change disguised as a patch.",
+  "main": "index.js",
+  "license": "MIT"
+}
