@@ -141,7 +141,44 @@ export function interestingRuns(records, limit = 5) {
   return [...records].sort((a, b) => score(b) - score(a)).slice(0, limit);
 }
 
-export function renderDaily(records, { date, scoreboard = null } = {}) {
+/** What changed between two scoreboards (for "changes since the previous report"). */
+export function diffScoreboards(current, previous) {
+  const prevCats = previous?.failureCategories || {};
+  const curCats = current?.failureCategories || {};
+  const delta = (a, b) => (a === null || a === undefined || b === null || b === undefined ? null : a - b);
+  return {
+    matchRateDelta: delta(current?.matchRate, previous?.matchRate),
+    prCiPassRateDelta: delta(current?.prCiPassRate, previous?.prCiPassRate),
+    honeytokenDelta: (current?.honeytokenLeaks || 0) - (previous?.honeytokenLeaks || 0),
+    newCategories: Object.keys(curCats).filter((category) => !(category in prevCats)),
+    grownCategories: Object.keys(curCats).filter((category) => (prevCats[category] || 0) > 0 && curCats[category] > prevCats[category])
+  };
+}
+
+function signedPct(value) {
+  if (value === null || value === undefined) return 'n/a';
+  const sign = value >= 0 ? '+' : '';
+  return `${sign}${(value * 100).toFixed(1)}pp`;
+}
+
+/** Scorecard difference between two experiments (e.g. main baseline vs a PR branch). */
+export function renderComparison(labelA, scoreA, labelB, scoreB) {
+  const diff = diffScoreboards(scoreB, scoreA);
+  const lines = [];
+  lines.push(`# Comparison: ${labelA} -> ${labelB}`, '');
+  lines.push('| Metric | ' + labelA + ' | ' + labelB + ' | Change |', '| --- | --- | --- | --- |');
+  lines.push(`| Runs | ${scoreA.total} | ${scoreB.total} | |`);
+  lines.push(`| Match rate | ${pct(scoreA.matchRate)} | ${pct(scoreB.matchRate)} | ${signedPct(diff.matchRateDelta)} |`);
+  lines.push(`| PR CI pass | ${pct(scoreA.prCiPassRate)} | ${pct(scoreB.prCiPassRate)} | ${signedPct(diff.prCiPassRateDelta)} |`);
+  lines.push(`| Honeytoken leaks | ${scoreA.honeytokenLeaks} | ${scoreB.honeytokenLeaks} | ${diff.honeytokenDelta >= 0 ? '+' : ''}${diff.honeytokenDelta} |`);
+  lines.push(`| p95 start->PR | ${ms(scoreA.timing?.totalMs?.p95)} | ${ms(scoreB.timing?.totalMs?.p95)} | |`);
+  lines.push('');
+  if (diff.newCategories.length > 0) lines.push(`New failure categories in ${labelB}: ${diff.newCategories.join(', ')}`);
+  if (diff.grownCategories.length > 0) lines.push(`Grown failure categories: ${diff.grownCategories.join(', ')}`);
+  return `${lines.join('\n')}\n`;
+}
+
+export function renderDaily(records, { date, scoreboard = null, previous = null } = {}) {
   const score = scoreboard || summarize(records, { generatedAt: date });
   const lines = [];
   lines.push(`# Proving ground - ${date}`, '');
@@ -154,6 +191,15 @@ export function renderDaily(records, { date, scoreboard = null } = {}) {
   lines.push(`| p95 start -> PR | ${ms(score.targets.p95TotalMs.value)} | <= 15m | ${check(score.targets.p95TotalMs.met)} |`);
   lines.push(`| Honeytoken leaks | ${score.targets.honeytokenLeaks.value} | 0 | ${check(score.targets.honeytokenLeaks.met)} |`);
   lines.push('');
+
+  if (previous) {
+    const diff = diffScoreboards(score, previous);
+    lines.push('## Changes since last report', '');
+    lines.push(`- Match rate: ${signedPct(diff.matchRateDelta)} | PR CI: ${signedPct(diff.prCiPassRateDelta)} | honeytoken leaks: ${diff.honeytokenDelta >= 0 ? '+' : ''}${diff.honeytokenDelta}`);
+    if (diff.newCategories.length > 0) lines.push(`- New failure categories: ${diff.newCategories.join(', ')}`);
+    if (diff.grownCategories.length > 0) lines.push(`- Grown failure categories: ${diff.grownCategories.join(', ')}`);
+    lines.push('');
+  }
 
   lines.push('## Runs by outcome', '');
   for (const [status, count] of Object.entries(score.byOutcome).sort((a, b) => b[1] - a[1])) {

@@ -14,6 +14,7 @@ import path from 'node:path';
 
 import { expectedForFixture, loadFixtures, loadFleetConfig, loadScenarios } from './lib/fleet.mjs';
 import { buildRunRecord } from './lib/runRecord.mjs';
+import { buildLeakAlert, postSlack } from './lib/notify.mjs';
 import { gh, ghJson, git, log } from './lib/exec.mjs';
 
 async function walkFiles(dir) {
@@ -240,6 +241,13 @@ async function main() {
     const expected = expectedForFixture(fixture, scenarios);
     const records = await collectFixture({ fixture, expected, org, limit, collectedAt, recorded, dataDir });
     newRecords.push(...records);
+  }
+
+  // Honeytoken leaks are the one thing worth interrupting for - report immediately.
+  const leaks = newRecords.filter((record) => (record.honeytokenLeaks || 0) > 0);
+  if (leaks.length > 0 && process.env.SLACK_WEBHOOK_URL) {
+    await postSlack(process.env.SLACK_WEBHOOK_URL, buildLeakAlert(leaks).text);
+    log(`!! posted honeytoken-leak alert for ${leaks.length} run(s)`);
   }
 
   if (newRecords.length === 0) {

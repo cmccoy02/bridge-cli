@@ -87,6 +87,26 @@ gh workflow run pg-collect.yml -f fixtures=js-npm-express-api,ts-yarn-lib
 gh workflow run pg-report.yml -f date=$(date -u +%F)
 ```
 
+To compare a branch experiment against a baseline (what the Phase 2 improvement loop
+uses), run the scorer locally against the data repo:
+
+```bash
+npm run pg:score -- --compare daily-2026-11-20 my-branch-test
+```
+
+It prints the before/after scorecard (match rate, PR CI pass rate, timing, new/grown
+failure categories) and writes nothing.
+
+## Notifications
+
+Connor hears about surprises, not routine. Add an optional `SLACK_WEBHOOK_URL` secret on
+`bridge-cli`; without it, notifications are skipped.
+
+- `pg-collect` posts immediately on any honeytoken leak.
+- `pg-report` posts a daily message only when something is unexpected (mismatches, a new
+  failure category, a leak, or a cycle that recorded nothing), and a weekly digest of the
+  scorecard against targets.
+
 ## Pull the data
 
 ```bash

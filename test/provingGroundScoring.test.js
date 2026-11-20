@@ -3,7 +3,8 @@ import test from 'node:test';
 
 import { classifyRun } from '../proving-ground/scripts/lib/classify.mjs';
 import { buildRunRecord, deriveActual, matchExpected } from '../proving-ground/scripts/lib/runRecord.mjs';
-import { percentile, summarize, renderDaily } from '../proving-ground/scripts/lib/scorecard.mjs';
+import { diffScoreboards, percentile, renderComparison, summarize, renderDaily } from '../proving-ground/scripts/lib/scorecard.mjs';
+import { buildDailyAlert, buildLeakAlert, buildWeeklyDigest, postSlack } from '../proving-ground/scripts/lib/notify.mjs';
 import { isoWeek } from '../proving-ground/scripts/score.mjs';
 
 test('classifyRun: honeytoken leak wins over everything', () => {
@@ -119,4 +120,58 @@ test('isoWeek formats an ISO week label', () => {
   assert.equal(isoWeek(new Date('2026-11-20T00:00:00Z')), '2026-W47');
   // 2026-01-01 is a Thursday, ISO week 1.
   assert.equal(isoWeek(new Date('2026-01-01T00:00:00Z')), '2026-W01');
+});
+
+test('diffScoreboards reports deltas and new/grown categories', () => {
+  const previous = { matchRate: 0.9, prCiPassRate: 0.5, honeytokenLeaks: 0, failureCategories: { network: 1 } };
+  const current = { matchRate: 0.8, prCiPassRate: 0.6, honeytokenLeaks: 0, failureCategories: { network: 3, cooldown: 2 } };
+  const diff = diffScoreboards(current, previous);
+  assert.ok(Math.abs(diff.matchRateDelta - -0.1) < 1e-9);
+  assert.deepEqual(diff.newCategories, ['cooldown']);
+  assert.deepEqual(diff.grownCategories, ['network']);
+});
+
+test('renderComparison prints a before/after scorecard', () => {
+  const a = summarize([{ match: true, actual: { status: 'pr_opened' }, ecosystem: 'js', size: 'S', scenarios: [], honeytokenLeaks: 0, timing: { phases: {} }, workflow: {} }]);
+  const b = summarize([{ match: false, actual: { status: 'failed' }, failure: { category: 'network' }, ecosystem: 'js', size: 'S', scenarios: [], honeytokenLeaks: 0, timing: { phases: {} }, workflow: {} }]);
+  const md = renderComparison('main', a, 'pr-branch', b);
+  assert.match(md, /Comparison: main -> pr-branch/);
+  assert.match(md, /Match rate/);
+});
+
+test('buildDailyAlert stays quiet on a clean day and fires on surprises', () => {
+  const scoreboard = { matchRate: 1, honeytokenLeaks: 0, failureCategories: {} };
+  const clean = buildDailyAlert({ scoreboard, dayRecords: [{ match: true, honeytokenLeaks: 0 }], date: '2026-11-20' });
+  assert.equal(clean, null);
+
+  const leaky = buildDailyAlert({
+    scoreboard: { matchRate: 0.5, honeytokenLeaks: 1, failureCategories: {} },
+    dayRecords: [{ fixtureId: 'js-npm-canary', match: false, honeytokenLeaks: 1, actual: { status: 'pr_opened' } }],
+    date: '2026-11-20'
+  });
+  assert.ok(leaky);
+  assert.match(leaky.text, /HONEYTOKEN LEAK/);
+});
+
+test('buildLeakAlert and buildWeeklyDigest format messages', () => {
+  assert.equal(buildLeakAlert([]), null);
+  const leak = buildLeakAlert([{ fixtureId: 'x', runId: 'r1', honeytokenLeaks: 2, workflow: { runUrl: 'u' } }]);
+  assert.match(leak.text, /honeytoken leak/i);
+
+  const digest = buildWeeklyDigest({ total: 10, matchRate: 0.9, prCiPassRate: 0.7, honeytokenLeaks: 0, failureCategories: { network: 2 }, targets: {} }, { week: '2026-W47' });
+  assert.match(digest.text, /weekly digest 2026-W47/);
+});
+
+test('postSlack is a no-op without a webhook and posts with one', async () => {
+  assert.deepEqual(await postSlack('', 'hi'), { status: 'skipped' });
+
+  let captured = null;
+  const fetchImpl = async (url, options) => {
+    captured = { url, body: JSON.parse(options.body) };
+    return { ok: true, status: 200 };
+  };
+  const result = await postSlack('https://hooks.example/abc', 'hello', { fetchImpl });
+  assert.equal(result.status, 'sent');
+  assert.equal(captured.url, 'https://hooks.example/abc');
+  assert.equal(captured.body.text, 'hello');
 });

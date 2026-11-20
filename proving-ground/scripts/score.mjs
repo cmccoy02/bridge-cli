@@ -10,7 +10,8 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { loadFleetConfig } from './lib/fleet.mjs';
-import { renderDaily, renderWeekly, summarize } from './lib/scorecard.mjs';
+import { renderComparison, renderDaily, renderWeekly, summarize } from './lib/scorecard.mjs';
+import { buildDailyAlert, buildWeeklyDigest, postSlack } from './lib/notify.mjs';
 import { gh, git, log } from './lib/exec.mjs';
 
 export function isoWeek(date) {
@@ -46,27 +47,53 @@ async function main() {
   const argv = process.argv.slice(2);
   let date = new Date().toISOString().slice(0, 10);
   let weekly = false;
+  let compare = null;
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === '--date') (date = argv[i + 1]), (i += 1);
     else if (argv[i] === '--weekly') weekly = true;
+    else if (argv[i] === '--compare') (compare = [argv[i + 1], argv[i + 2]]), (i += 2);
   }
 
   const config = await loadFleetConfig();
   const org = config.fleetOrg;
+  const webhook = process.env.SLACK_WEBHOOK_URL || '';
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pg-score-'));
   await gh(['repo', 'clone', `${org}/${config.dataRepo}`, dataDir, '--', '--depth', '1']);
 
   const allRecords = readRecords(await fs.readFile(path.join(dataDir, 'records', 'runs.jsonl'), 'utf8').catch(() => ''));
+
+  // --compare prints the scorecard difference between two experiments (the improvement
+  // loop needs this: main baseline vs a PR branch). It never writes to the data repo.
+  if (compare) {
+    const [labelA, labelB] = compare;
+    const scoreA = summarize(allRecords.filter((record) => record.experimentId === labelA), { generatedAt: labelA });
+    const scoreB = summarize(allRecords.filter((record) => record.experimentId === labelB), { generatedAt: labelB });
+    process.stdout.write(renderComparison(labelA, scoreA, labelB, scoreB));
+    await fs.rm(dataDir, { recursive: true, force: true });
+    return;
+  }
+
   const dayRecords = allRecords.filter(
     (record) => record.experimentId === `daily-${date}` || String(record.collectedAt || '').slice(0, 10) === date
   );
 
-  const dailyMd = renderDaily(dayRecords, { date });
+  // The scoreboard being overwritten is the "previous report" for the changes section.
+  const scoreboardPath = path.join(dataDir, 'scoreboard.json');
+  const previous = JSON.parse(await fs.readFile(scoreboardPath, 'utf8').catch(() => 'null'));
+
+  const dailyMd = renderDaily(dayRecords, { date, previous });
   await fs.mkdir(path.join(dataDir, 'reports', 'daily'), { recursive: true });
   await fs.writeFile(path.join(dataDir, 'reports', 'daily', `${date}.md`), dailyMd);
 
   const scoreboard = summarize(allRecords, { generatedAt: new Date().toISOString() });
-  await fs.writeFile(path.join(dataDir, 'scoreboard.json'), `${JSON.stringify(scoreboard, null, 2)}\n`);
+  await fs.writeFile(scoreboardPath, `${JSON.stringify(scoreboard, null, 2)}\n`);
+
+  // Notify only on surprises (and always on a honeytoken leak).
+  const alert = buildDailyAlert({ scoreboard, previous, dayRecords, date, incomplete: dayRecords.length === 0 });
+  if (alert && webhook) {
+    const result = await postSlack(webhook, alert.text);
+    log(`daily alert ${result.status}`);
+  }
 
   if (weekly) {
     const week = isoWeek(new Date(`${date}T00:00:00Z`));
@@ -74,6 +101,13 @@ async function main() {
     await fs.mkdir(path.join(dataDir, 'reports', 'weekly'), { recursive: true });
     await fs.writeFile(path.join(dataDir, 'reports', 'weekly', `${week}.md`), renderWeekly(weekRecords, { week }));
     log(`wrote weekly report ${week}`);
+
+    if (webhook) {
+      const weekScore = summarize(weekRecords, { generatedAt: week });
+      const digest = buildWeeklyDigest(weekScore, { week });
+      const result = await postSlack(webhook, digest.text);
+      log(`weekly digest ${result.status}`);
+    }
   }
 
   const env = {
