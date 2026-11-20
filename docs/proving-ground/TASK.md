@@ -198,10 +198,21 @@ excerpt so an agent can re-classify `unknown`.
 
 ### 6. Scorecard and report
 
-Daily markdown: runs by outcome, expected-vs-actual matrix per planted case, PR CI pass
-rate, timing (p50/p95 per job and per Bridge phase, by ecosystem and size), new failure
-categories, and links to the 5 most interesting runs. Compare against the scorecard
-targets above.
+Scripts compute every number; agents never do the arithmetic. `score.mjs` writes
+`scoreboard.json` (machine-readable, stable keys) and a markdown report: runs by
+outcome, expected-vs-actual matrix per planted case, PR CI pass rate, timing
+(p50/p95 per job and per Bridge phase, by ecosystem and size), new or growing failure
+categories, changes since the previous report, and links to the 5 most interesting
+runs. Compare against the scorecard targets above.
+
+### 7. Notifications
+
+Connor should hear about surprises, not routine. Add an optional `SLACK_WEBHOOK_URL`
+secret on `bridge-cli` (skip notifications when it is absent):
+
+- Daily, only if something is unexpected: mismatches, new failure categories, any
+  honeytoken leak (always, immediately), or a cycle that did not complete.
+- Weekly digest: the scorecard against targets and what changed.
 
 ### Phase 1 is done when
 
@@ -214,6 +225,9 @@ targets above.
 - `npm test` still passes; new code has tests; the corpus still passes.
 - `docs/proving-ground/README.md` explains how to add a fixture, run an experiment
   against a branch, and pull the data.
+- `pg-run.yml` can run the whole fleet against any `bridge-cli` branch and
+  `score.mjs --compare <experimentA> <experimentB>` prints the scorecard difference
+  (needed by the improvement loop in Phase 2).
 
 ## Phase 2
 
@@ -227,8 +241,42 @@ targets above.
 - Switch publish to the Bridge GitHub App through the console broker; add the
   proving-ground workflow ref to the console's `BRIDGE_TRUSTED_WORKFLOWS`.
 - Bridge fix: cooldown check honors configured and scoped registries with auth.
-- Analysis loop: a weekly agent reads `AGENTS.md` + the data and opens issues in
-  `cmccoy02/bridge-cli` labeled `proving-ground`, each citing run IDs and raw evidence.
+- Analysis loop: a weekly agent reads `AGENTS.md` + the scoreboard and opens issues
+  in `cmccoy02/bridge-cli` labeled `proving-ground`, one finding per issue, each citing
+  run IDs and raw evidence. (Connor will run this as a Claude scheduled task; build
+  only what it needs: `pull-data.mjs`, stable scoreboard keys, `AGENTS.md`.)
+- Improvement loop, see below.
+
+## Improvement loop (Phase 2)
+
+Goal: an issue labeled `agent-ready` becomes a pull request whose effect on the whole
+fleet is measured before anyone merges it.
+
+1. A coding agent (Claude Code) picks an `agent-ready` issue, writes the fix plus a
+   test, and a planted case or corpus fixture that reproduces the problem, then opens
+   a PR on `bridge-cli` that references the issue.
+2. A workflow `pg-pr-eval.yml` (triggered by a `fleet-eval` label on a PR from this
+   repository, never from forks) runs the full fleet with `bridge_ref` set to the PR
+   branch, waits for collection, runs `score.mjs --compare <main baseline> <PR run>`
+   and posts the before/after scorecard as a PR comment.
+3. Merge rule, enforced by the comment and by review: the targeted metric improves and
+   no other metric regresses beyond noise (define noise from repeated runs of `main`).
+4. Connor approves every merge. Anything touching `src/commands/publish.js`,
+   `src/core/handoff.js`, `src/core/executor.js`, `src/core/cooldown.js`, `src/core/cloud.js`,
+   `action.yml` or `.github/workflows/bridge.yml` also gets a second review
+   (Codex or a fresh Claude session that did not write it). Add a `CODEOWNERS` entry
+   for those paths.
+
+Guardrails (the loop must not be able to game its own score):
+
+- Fixing agents must not modify `proving-ground/catalog/**`, expected outcomes,
+  `proving-ground/scripts/score.mjs`, or fleet repos. `pg-pr-eval.yml` fails the
+  evaluation if a PR touches those paths; such changes go in separate, human-reviewed PRs.
+- No special-casing fixture names, scopes or the `@pg` scope in Bridge code. Add a
+  check that fails CI if `src/**` mentions fixture IDs.
+- A PR may not weaken a safety gate (cooldown, audit, validation, publish checks) to
+  improve a pass rate. If the agent believes a gate is wrong, it writes that up in the
+  issue instead.
 
 ## Stop and ask Connor only for
 
