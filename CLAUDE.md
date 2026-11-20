@@ -66,6 +66,11 @@ node bin/bridge.js ...   # run from source
 | `BRIDGE_OIDC_AUDIENCE` | publish | Defaults to the origin of `BRIDGE_API_URL` |
 | `BRIDGE_HOME` | all | Run history (default `~/.bridge`) |
 
+## Proving ground
+
+The fleet-wide test system lives in `proving-ground/` and is specified in
+`docs/proving-ground/TASK.md`. Analysis agents follow `proving-ground/AGENTS.md`.
+
 ## Open work
 
 - Rebuild the PR package table in `publish` from the lockfile diff (trusted).

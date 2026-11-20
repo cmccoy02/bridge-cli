@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Proving ground run record (one line of records/runs.jsonl)",
+  "type": "object",
+  "required": ["recordVersion", "runId", "fixtureId", "experimentId", "collectedAt", "expected", "actual", "match", "workflow"],
+  "properties": {
+    "recordVersion": { "const": 1 },
+    "runId": { "type": "string", "description": "Bridge run ID from the report; workflow run ID if Bridge never started." },
+    "experimentId": { "type": "string", "description": "daily-YYYY-MM-DD, or the dispatch input for experiments." },
+    "fixtureId": { "type": "string" },
+    "tier": { "enum": ["synthetic", "snapshot", "dogfood"] },
+    "ecosystem": { "type": "string" },
+    "manager": { "type": "string" },
+    "size": { "type": "string" },
+    "mode": { "enum": ["reset", "steady"] },
+    "scenarios": { "type": "array", "items": { "type": "string" } },
+    "bridge": {
+      "type": "object",
+      "properties": {
+        "ref": { "type": "string" },
+        "sha": { "type": "string" },
+        "version": { "type": "string" }
+      }
+    },
+    "asOf": { "type": ["string", "null"] },
+    "collectedAt": { "type": "string", "format": "date-time" },
+    "expected": {
+      "type": "object",
+      "properties": {
+        "status": { "type": "array", "items": { "type": "string" } },
+        "gate": { "type": ["string", "null"] },
+        "knownMiss": { "type": "boolean" }
+      }
+    },
+    "actual": {
+      "type": "object",
+      "properties": {
+        "status": { "type": "string", "description": "pr_opened | pr_updated | pr_unchanged | up_to_date | blocked | failed | cancelled | no_report" },
+        "gate": { "type": ["string", "null"] },
+        "message": { "type": ["string", "null"] }
+      }
+    },
+    "match": { "type": "boolean" },
+    "failure": {
+      "type": ["object", "null"],
+      "properties": {
+        "category": { "type": "string" },
+        "excerpt": { "type": "string", "maxLength": 4000 },
+        "classifiedBy": { "enum": ["rules", "agent"] }
+      }
+    },
+    "changes": {
+      "type": "object",
+      "properties": {
+        "direct": { "type": "integer" },
+        "transitive": { "type": "integer" },
+        "byBump": { "type": "object" }
+      }
+    },
+    "cooldown": { "type": ["object", "null"], "description": "outcome.cooldown from the report, trimmed to counts and violations." },
+    "audit": { "type": ["object", "null"], "description": "Before/after vulnerability counts." },
+    "checks": { "type": ["object", "null"], "description": "Script totals and per-command results." },
+    "honeytokenLeaks": { "type": "integer", "description": "Count of honeytoken sightings in canary reports, logs, artifacts or the PR body." },
+    "pr": {
+      "type": ["object", "null"],
+      "properties": {
+        "number": { "type": "integer" },
+        "url": { "type": "string" },
+        "ciConclusion": { "type": ["string", "null"], "description": "Conclusion of the fixture's ci.yml on the PR head." },
+        "state": { "enum": ["open", "merged", "closed"] },
+        "mergedAt": { "type": ["string", "null"] }
+      }
+    },
+    "timing": {
+      "type": "object",
+      "properties": {
+        "queuedMs": { "type": "integer" },
+        "updateJobMs": { "type": "integer" },
+        "publishJobMs": { "type": "integer" },
+        "totalMs": { "type": "integer", "description": "Workflow created to PR opened (or run end)." },
+        "phases": { "type": "object", "description": "Bridge phase name -> duration ms, from the report." }
+      }
+    },
+    "workflow": {
+      "type": "object",
+      "required": ["runUrl"],
+      "properties": {
+        "runUrl": { "type": "string" },
+        "conclusion": { "type": "string" },
+        "artifacts": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "rawBundle": { "type": "string", "description": "Path inside the weekly raw release asset." }
+  }
+}

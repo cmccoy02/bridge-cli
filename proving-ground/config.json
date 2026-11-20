@@ -1,0 +1,8 @@
+{
+  "fleetOrg": "SET-ME",
+  "dataRepo": "proving-ground-data",
+  "bridgeWorkflowRef": "main",
+  "concurrency": 10,
+  "dailyRunUtc": "09:17",
+  "artifactRetentionDays": 30
+}

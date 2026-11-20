@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Proving ground fixture",
+  "type": "object",
+  "required": ["id", "tier", "ecosystem", "manager", "template", "size", "driftDate", "mode", "scenarios"],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{2,60}$", "description": "Also the fleet repo name." },
+    "tier": { "enum": ["synthetic", "snapshot", "dogfood"] },
+    "ecosystem": { "enum": ["javascript", "typescript", "python", "elixir", "ruby", "go", "mixed"] },
+    "manager": { "enum": ["npm", "pnpm", "yarn-classic", "yarn-berry", "uv", "poetry", "pip-compile", "pipenv", "pip", "mix", "bundler", "go"] },
+    "template": { "type": "string", "description": "Directory under proving-ground/templates/, or 'snapshot' for imported repos." },
+    "size": { "enum": ["XS", "S", "M", "L", "XL"], "description": "XS <=10, S <=100, M <=500, L <=1500, XL >1500 locked packages." },
+    "driftDate": { "type": "string", "format": "date", "description": "Dependencies are pinned to versions published before this date." },
+    "mode": { "enum": ["reset", "steady"], "description": "reset: back to baseline after every run. steady: green Bridge PRs are merged." },
+    "scenarios": { "type": "array", "items": { "type": "string" }, "description": "Ids from catalog/scenarios.json. Use clean-drift when nothing is planted." },
+    "checks": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Commands Bridge runs before and after (afterScripts). Defaults to bridge init detection."
+    },
+    "languageVersions": {
+      "type": "object",
+      "properties": {
+        "node": { "type": "string" },
+        "python": { "type": "string" },
+        "otp": { "type": "string" },
+        "elixir": { "type": "string" },
+        "ruby": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "usesMockRegistry": { "type": "boolean", "default": false },
+    "snapshot": {
+      "type": "object",
+      "description": "Only for tier=snapshot.",
+      "required": ["upstream", "commit", "license", "testCommand"],
+      "properties": {
+        "upstream": { "type": "string", "pattern": "^[\\w.-]+/[\\w.-]+$" },
+        "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "license": { "type": "string" },
+        "testCommand": { "type": "string" }
+      }
+    },
+    "notes": { "type": "string" }
+  }
+}
