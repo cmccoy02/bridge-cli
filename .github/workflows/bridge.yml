@@ -38,11 +38,49 @@ on:
         description: Install this npm first (npm 11.10+ enforces the release-age cooldown natively).
         type: string
         default: ''
+      python-version:
+        description: Python for your project. Enables Python setup and installs uv/Poetry/Pipenv/pip-tools when the lockfile calls for it.
+        type: string
+        default: ''
+      otp-version:
+        description: Erlang/OTP version for Elixir projects (required with elixir-version).
+        type: string
+        default: ''
+      elixir-version:
+        description: Elixir version. Enables BEAM setup for mix projects.
+        type: string
+        default: ''
       registry-url:
         description: Private npm registry URL, used with the npm-token secret.
         type: string
         default: ''
       registry-scope:
+        type: string
+        default: ''
+      setup-script:
+        description: >-
+          Path (in the caller repo) to a script run in the update job before Bridge.
+          For a mock registry, start it here; for a private registry, authenticate here.
+          It never runs in the publish job.
+        type: string
+        default: ''
+      bridge-ref:
+        description: >-
+          Run the Bridge CLI from this cmccoy02/bridge-cli ref instead of the pinned
+          action, so an unreleased branch can be tested across a fleet. The engine
+          repository is always cmccoy02/bridge-cli.
+        type: string
+        default: ''
+      experiment-id:
+        description: Copied into the run report as report.experiment.id.
+        type: string
+        default: ''
+      fixture-id:
+        description: Copied into the run report as report.experiment.fixtureId.
+        type: string
+        default: ''
+      as-of:
+        description: Time machine - run `bridge patch --as-of <ISO date>` as if today were that date.
         type: string
         default: ''
       args:
@@ -70,6 +108,12 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: read
+    env:
+      # A known BRIDGE_HOME so the raw-log upload can find the run history, and the
+      # experiment metadata the report records (report.experiment).
+      BRIDGE_HOME: ${{ runner.temp }}/bridge-home
+      BRIDGE_EXPERIMENT_ID: ${{ inputs.experiment-id }}
+      BRIDGE_FIXTURE_ID: ${{ inputs.fixture-id }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -98,7 +142,39 @@ jobs:
           NPM_VERSION: ${{ inputs.npm-version }}
         run: npm install -g "npm@${NPM_VERSION}"
 
+      - name: Set up Python
+        if: inputs.python-version != ''
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Install Python package managers the lockfile calls for
+        if: inputs.python-version != ''
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f uv.lock ]; then python -m pip install uv; fi
+          if [ -f poetry.lock ]; then python -m pip install poetry; fi
+          if [ -f Pipfile.lock ] || [ -f Pipfile ]; then python -m pip install pipenv; fi
+          if [ -f requirements.in ]; then python -m pip install pip-tools; fi
+
+      - name: Set up Elixir/OTP
+        if: inputs.elixir-version != ''
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ inputs.otp-version }}
+          elixir-version: ${{ inputs.elixir-version }}
+
+      - name: Run setup script
+        if: inputs.setup-script != ''
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          BRIDGE_SETUP_SCRIPT: ${{ inputs.setup-script }}
+        run: bash "$BRIDGE_SETUP_SCRIPT"
+
+      # Default path: the pinned, published composite action.
       - name: Bridge update
+        if: inputs.bridge-ref == ''
         uses: cmccoy02/bridge-cli@main
         env:
           NODE_AUTH_TOKEN: ${{ secrets.npm-token }}
@@ -108,7 +184,32 @@ jobs:
           working-directory: ${{ inputs.working-directory }}
           handoff-dir: ${{ runner.temp }}/bridge-handoff
           api-url: ${{ inputs.api-url }}
-          args: ${{ inputs.args }}
+          args: ${{ inputs.as-of != '' && format('{0} --as-of {1}', inputs.args, inputs.as-of) || inputs.args }}
+
+      # Alternate path: run an unreleased branch of the same trusted engine repo.
+      - name: Bridge update (from ref)
+        if: inputs.bridge-ref != ''
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.npm-token }}
+          NPM_TOKEN: ${{ secrets.npm-token }}
+          BRIDGE_API_URL: ${{ inputs.api-url }}
+          BRIDGE_REF: ${{ inputs.bridge-ref }}
+          BRIDGE_ARGS: ${{ inputs.args }}
+          BRIDGE_AS_OF: ${{ inputs.as-of }}
+        run: |
+          set -euo pipefail
+          engine="$RUNNER_TEMP/bridge-engine"
+          git init -q "$engine"
+          git -C "$engine" remote add origin https://github.com/cmccoy02/bridge-cli
+          git -C "$engine" fetch -q --depth 1 origin "$BRIDGE_REF"
+          git -C "$engine" checkout -q FETCH_HEAD
+          npm --prefix "$engine" ci --omit=dev --ignore-scripts --no-audit --no-fund --loglevel=error
+          node "$engine/bin/bridge.js" init --yes
+          extra="$BRIDGE_ARGS"
+          if [ -n "$BRIDGE_AS_OF" ]; then extra="$extra --as-of $BRIDGE_AS_OF"; fi
+          # shellcheck disable=SC2086
+          node "$engine/bin/bridge.js" patch --handoff "$RUNNER_TEMP/bridge-handoff" $extra
 
       - name: Hand off to publish job
         if: always()
@@ -120,6 +221,16 @@ jobs:
           retention-days: 3
           if-no-files-found: warn
 
+      - name: Upload update-job logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bridge-logs-update
+          path: ${{ runner.temp }}/bridge-home/runs
+          include-hidden-files: true
+          retention-days: 30
+          if-no-files-found: ignore
+
   publish:
     name: Publish pull request
     needs: update
@@ -129,6 +240,8 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    env:
+      BRIDGE_HOME: ${{ runner.temp }}/bridge-home
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -147,7 +260,9 @@ jobs:
           name: bridge-handoff
           path: ${{ runner.temp }}/bridge-handoff
 
+      # Default path: the pinned, published composite action.
       - name: Bridge publish
+        if: inputs.bridge-ref == ''
         uses: cmccoy02/bridge-cli@main
         env:
           BRIDGE_GITHUB_TOKEN: ${{ secrets.bridge-github-token }}
@@ -156,3 +271,41 @@ jobs:
           working-directory: ${{ inputs.working-directory }}
           handoff-dir: ${{ runner.temp }}/bridge-handoff
           api-url: ${{ inputs.api-url }}
+
+      # Alternate path: publish from the same unreleased engine ref. The engine
+      # repository is always cmccoy02/bridge-cli, so this runs only trusted code.
+      - name: Bridge publish (from ref)
+        if: inputs.bridge-ref != ''
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          BRIDGE_GITHUB_TOKEN: ${{ secrets.bridge-github-token }}
+          BRIDGE_API_URL: ${{ inputs.api-url }}
+          BRIDGE_REF: ${{ inputs.bridge-ref }}
+        run: |
+          set -euo pipefail
+          engine="$RUNNER_TEMP/bridge-engine"
+          git init -q "$engine"
+          git -C "$engine" remote add origin https://github.com/cmccoy02/bridge-cli
+          git -C "$engine" fetch -q --depth 1 origin "$BRIDGE_REF"
+          git -C "$engine" checkout -q FETCH_HEAD
+          npm --prefix "$engine" ci --omit=dev --ignore-scripts --no-audit --no-fund --loglevel=error
+          node "$engine/bin/bridge.js" publish "$RUNNER_TEMP/bridge-handoff"
+
+      - name: Upload final report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bridge-report-final
+          path: ${{ runner.temp }}/bridge-handoff/bridge-report.final.json
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Upload publish-job logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bridge-logs-publish
+          path: ${{ runner.temp }}/bridge-home/runs
+          include-hidden-files: true
+          retention-days: 30
+          if-no-files-found: ignore
