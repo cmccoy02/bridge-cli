@@ -214,7 +214,8 @@ test('pull request body includes report path, package table, and bundle delta', 
   assert.match(commands[1], /4\.2\.12/);
   assert.match(commands[1], /Bundle size/);
   assert.match(commands[1], /brotli/);
-  assert.match(commands[1], /bridge-report\.v1\.json/);
+  assert.doesNotMatch(commands[1], /bridge-report\.v1\.json/);
+  assert.doesNotMatch(commands[1], /\/tmp\/bridge-home/);
 });
 
 test('pull request creation is unavailable when gh is not installed', async () => {

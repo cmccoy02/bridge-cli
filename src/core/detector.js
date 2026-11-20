@@ -375,3 +375,57 @@ export async function detectProject(cwd = process.cwd()) {
     unsupported
   };
 }
+
+const VALIDATION_SCRIPT_GROUPS = [
+  ['typecheck', 'type-check', 'check-types', 'types', 'tsc'],
+  ['lint'],
+  ['test:ci', 'test'],
+  ['build']
+];
+const NPM_DEFAULT_TEST = /no test specified/i;
+
+function runScriptCommand(packageManager, scriptName) {
+  if (packageManager === 'npm' && scriptName === 'test') {
+    return 'npm test';
+  }
+
+  const runner = ['pnpm', 'yarn'].includes(packageManager) ? packageManager : 'npm';
+  return `${runner} run ${scriptName}`;
+}
+
+/**
+ * Picks the checks Bridge should run before and after an update from package.json
+ * scripts: typecheck, lint, tests, build (in that order, first match per group).
+ */
+export async function detectValidationScripts(cwd = process.cwd(), packageManager = 'npm') {
+  if (!['npm', 'pnpm', 'yarn'].includes(packageManager)) {
+    return [];
+  }
+
+  let scripts = {};
+
+  try {
+    const manifest = JSON.parse(await fs.readFile(path.join(cwd, 'package.json'), 'utf8'));
+    scripts = manifest?.scripts && typeof manifest.scripts === 'object' ? manifest.scripts : {};
+  } catch {
+    return [];
+  }
+
+  const commands = [];
+
+  for (const group of VALIDATION_SCRIPT_GROUPS) {
+    const match = group.find(
+      (name) =>
+        typeof scripts[name] === 'string' &&
+        scripts[name].trim() &&
+        !(name === 'test' && NPM_DEFAULT_TEST.test(scripts[name])) &&
+        !/--watch\b/.test(scripts[name])
+    );
+
+    if (match) {
+      commands.push(runScriptCommand(packageManager, match));
+    }
+  }
+
+  return commands;
+}
