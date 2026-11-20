@@ -364,3 +364,139 @@ export function findNonDependencyManifestChanges(beforeText, afterText) {
 
   return changed;
 }
+
+// ---------------------------------------------------------------------------
+// Content checks for files a dependency update is allowed to change.
+
+// Bridge's updates never edit these: they hold build configuration or executable
+// code (mix.exs is Elixir), so any change means the update job did something else.
+const UNCHANGEABLE_BASENAMES = new Set([
+  'mix.exs',
+  'pyproject.toml',
+  'Pipfile',
+  'requirements.in',
+  'pnpm-workspace.yaml'
+]);
+
+// Hosts a lockfile may always reference, even if the old lockfile did not.
+const WELL_KNOWN_REGISTRY_HOSTS = new Set([
+  'registry.npmjs.org',
+  'registry.yarnpkg.com',
+  'pypi.org',
+  'files.pythonhosted.org',
+  'repo.hex.pm'
+]);
+
+const URL_RE = /\b(?:https?|git\+https?|git\+ssh|ssh|git):\/\/(?:[^@\s"'/]+@)?([A-Za-z0-9.-]+)/g;
+
+export function collectUrlHosts(text) {
+  const hosts = new Set();
+
+  for (const match of String(text || '').matchAll(URL_RE)) {
+    hosts.add(match[1].toLowerCase());
+  }
+
+  return hosts;
+}
+
+// Dependency specs that fetch code from somewhere other than the registry.
+const NON_REGISTRY_SPEC_RE = /^(?:[a-z+]+:\/\/|git\+|git:|github:|gitlab:|bitbucket:|gist:|file:|link:|portal:|patch:)|^[\w.-]+\/[\w.-]+(?:#.*)?$/i;
+
+function dependencySpecProblems(before, after) {
+  const problems = [];
+  const sections = ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies'];
+
+  for (const section of sections) {
+    const next = after?.[section];
+
+    if (!next || typeof next !== 'object') {
+      continue;
+    }
+
+    for (const [name, spec] of Object.entries(next)) {
+      const previous = before?.[section]?.[name];
+
+      if (previous === spec) {
+        continue;
+      }
+
+      if (typeof spec !== 'string' || NON_REGISTRY_SPEC_RE.test(spec.trim())) {
+        problems.push(`${section}.${name} points outside the registry (${String(spec).slice(0, 80)})`);
+      }
+
+      if (previous === undefined) {
+        problems.push(`${section}.${name} is a new dependency`);
+      }
+    }
+  }
+
+  return problems;
+}
+
+function addedLines(beforeText, afterText) {
+  const before = new Set(String(beforeText || '').split(/\r?\n/).map((line) => line.trim()));
+  return String(afterText || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !before.has(line));
+}
+
+/**
+ * Returns reasons to refuse a changed file, or [] when the change looks like what a
+ * dependency update produces. `beforeText` is the file at the base commit.
+ */
+export function checkDependencyFileChange(relativePath, beforeText, afterText) {
+  const basename = relativePath.split('/').pop();
+
+  if (beforeText === afterText) {
+    return [];
+  }
+
+  if (beforeText === null || beforeText === undefined) {
+    return [`${relativePath} does not exist on the base commit; Bridge only updates existing files`];
+  }
+
+  if (UNCHANGEABLE_BASENAMES.has(basename)) {
+    return [`${relativePath} changed, but dependency updates never edit it`];
+  }
+
+  const problems = [];
+
+  if (basename === 'package.json') {
+    let before;
+    let after;
+
+    try {
+      before = JSON.parse(beforeText);
+      after = JSON.parse(afterText);
+    } catch {
+      return [`${relativePath} is not valid JSON`];
+    }
+
+    const outside = findNonDependencyManifestChanges(beforeText, afterText);
+
+    if (outside.length > 0) {
+      problems.push(`${relativePath}: fields outside dependency sections changed (${outside.join(', ')})`);
+    }
+
+    problems.push(...dependencySpecProblems(before, after).map((problem) => `${relativePath}: ${problem}`));
+  }
+
+  if (basename === 'requirements.txt') {
+    for (const line of addedLines(beforeText, afterText)) {
+      if (line.startsWith('-') || line.includes('://') || /\s@\s/.test(line)) {
+        problems.push(`${relativePath}: new line installs from outside the index (${line.slice(0, 80)})`);
+      }
+    }
+  }
+
+  const knownHosts = collectUrlHosts(beforeText);
+
+  for (const host of collectUrlHosts(afterText)) {
+    if (!knownHosts.has(host) && !WELL_KNOWN_REGISTRY_HOSTS.has(host)) {
+      problems.push(`${relativePath}: downloads from a new host (${host})`);
+    }
+  }
+
+  return problems;
+}

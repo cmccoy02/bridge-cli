@@ -38,9 +38,16 @@ The `publish` job treats the bundle as untrusted. It:
 - accepts only dependency manifests and lockfiles (no `.github/`, no source,
   no `node_modules`, no path traversal, no symlinks), and checks each file's
   SHA-256;
+- requires the bundle's base commit to already be on the default branch, so a
+  compromised update job cannot slip other commits into the pull request;
 - rejects any `package.json` change outside `dependencies`,
   `devDependencies`, `optionalDependencies`, `peerDependencies`, `overrides`,
-  `resolutions` and `pnpm.overrides` (so no new `scripts`);
+  `resolutions` and `pnpm.overrides` (so no new `scripts`), any new dependency,
+  and any spec that installs from outside the registry (git, URLs, `file:`);
+- rejects lockfiles or manifests that download from a host the old file never
+  used, `requirements.txt` lines that add index options or URLs, and any change
+  to files dependency updates never edit (`mix.exs`, `pyproject.toml`, `Pipfile`,
+  `requirements.in`, `pnpm-workspace.yaml`);
 - only pushes branches that start with `bridge/`, never the default branch,
   and uses `--force-with-lease` when refreshing its own PR;
 - commits with hooks disabled, as the Bridge bot;

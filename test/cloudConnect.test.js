@@ -19,6 +19,7 @@ import {
   runCommand
 } from '../src/core/executor.js';
 import {
+  checkDependencyFileChange,
   findNonDependencyManifestChanges,
   readHandoffBundle,
   validateBranchName,
@@ -323,6 +324,40 @@ test('package.json may only change inside dependency sections', () => {
   assert.deepEqual(findNonDependencyManifestChanges(before, scriptChange), ['scripts', 'pnpm']);
 });
 
+test('dependency file changes must look like a dependency update', () => {
+  const lockBefore = JSON.stringify({
+    packages: { 'node_modules/ms': { version: '2.1.1', resolved: 'https://registry.npmjs.org/ms/-/ms-2.1.1.tgz' } }
+  });
+  const lockAfter = lockBefore.replaceAll('2.1.1', '2.1.3');
+  const lockEvil = JSON.stringify({
+    packages: { 'node_modules/ms': { version: '2.1.3', resolved: 'https://evil.example/ms-2.1.3.tgz' } }
+  });
+
+  assert.deepEqual(checkDependencyFileChange('package-lock.json', lockBefore, lockAfter), []);
+  assert.match(checkDependencyFileChange('package-lock.json', lockBefore, lockEvil)[0], /new host \(evil\.example\)/);
+  assert.match(checkDependencyFileChange('package-lock.json', null, lockAfter)[0], /does not exist on the base commit/);
+  assert.match(checkDependencyFileChange('mix.exs', 'defmodule A do end', 'defmodule B do end')[0], /never edit/);
+
+  const manifest = (deps) => JSON.stringify({ name: 'app', dependencies: deps });
+  assert.deepEqual(checkDependencyFileChange('package.json', manifest({ ms: '^2.1.1' }), manifest({ ms: '^2.1.3' })), []);
+  assert.deepEqual(
+    checkDependencyFileChange('package.json', manifest({ x: 'npm:@scope/y@^1.0.0' }), manifest({ x: 'npm:@scope/y@^1.2.0' })),
+    []
+  );
+  assert.match(
+    checkDependencyFileChange('package.json', manifest({ ms: '^2.1.1' }), manifest({ ms: 'github:attacker/ms' })).join(' '),
+    /outside the registry/
+  );
+  assert.match(
+    checkDependencyFileChange('package.json', manifest({ ms: '^2.1.1' }), manifest({ ms: '^2.1.1', evil: '^1.0.0' })).join(' '),
+    /new dependency/
+  );
+  assert.match(
+    checkDependencyFileChange('requirements.txt', 'requests==2.32.4\n', 'requests==2.32.5\n--extra-index-url https://evil.example/simple\n').join(' '),
+    /outside the index/
+  );
+});
+
 test('handoff bundles round-trip and reject tampering', async () => {
   const workspace = await tempDir('bridge-ws-');
   const handoffDir = await tempDir('bridge-handoff-');
@@ -607,6 +642,42 @@ test('publish refuses a handoff that changes package.json scripts', async () => 
   assert.equal(git(remote, 'branch', '--list', 'bridge/*'), '', 'nothing was pushed');
   assert.equal(uploads[0].publish.status, 'failed');
   assert.match(uploads[0].publish.message, /scripts/);
+});
+
+test('publish refuses a base commit that is not on the default branch', async () => {
+  const { root, remote, checkout } = await makeRemoteRepo();
+  // An attacker-controlled commit that exists in the repository but not on main.
+  const side = path.join(root, 'side');
+  git(root, 'clone', remote, side);
+  git(side, 'checkout', '-b', 'not-main');
+  await fs.writeFile(path.join(side, 'backdoor.js'), 'process.exit(1)\n');
+  git(side, 'add', '.');
+  git(side, 'commit', '-m', 'sneaky');
+  git(side, 'push', 'origin', 'not-main');
+  const sneakySha = git(side, 'rev-parse', 'HEAD');
+  const handoffDir = await makeHandoff({
+    root,
+    baseSha: sneakySha,
+    lockfile: `${JSON.stringify({ lockfileVersion: 3, packages: { 'node_modules/ms': { version: '2.1.3' } } }, null, 2)}\n`
+  });
+  const uploads = [];
+
+  const ok = await publishCommand({
+    handoffDir,
+    cwd: checkout,
+    env: { ...process.env, GITHUB_REPOSITORY: 'acme/app', GITHUB_ACTIONS: '', GITHUB_STEP_SUMMARY: '' },
+    obtainToken: async () => ({ token: 'ghs_test', source: 'broker' }),
+    commandExistsFn: async () => true,
+    ghRunner: async () => ({ success: true, stdout: '[]', stderr: '', code: 0 }),
+    uploadReport: async (_settings, report) => {
+      uploads.push(report);
+      return { status: 'uploaded', url: '' };
+    }
+  });
+
+  assert.equal(ok, false);
+  assert.match(uploads[0].publish.message, /not in the recent history of main/);
+  assert.equal(git(remote, 'branch', '--list', 'bridge/*'), '', 'nothing was pushed');
 });
 
 test('publish refuses a handoff built for a different repository', async () => {

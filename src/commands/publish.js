@@ -11,7 +11,7 @@ import {
 } from '../core/cloud.js';
 import { runCommand } from '../core/executor.js';
 import {
-  findNonDependencyManifestChanges,
+  checkDependencyFileChange,
   HandoffError,
   readHandoffBundle,
   validateBranchName
@@ -256,7 +256,29 @@ export async function publishCommand({
     }
 
     const baseSha = manifest.base.sha;
+
+    // The base commit comes from the untrusted bundle. It must already be on the
+    // default branch, or a compromised update job could slip arbitrary commits into
+    // a "dependency update" pull request.
+    if (!defaultBranch || !/^[A-Za-z0-9._/-]+$/.test(defaultBranch)) {
+      throw new HandoffError('Could not determine the repository default branch.');
+    }
+
+    await git(
+      `fetch --no-tags --depth=200 origin ${shellQuote(`+refs/heads/${defaultBranch}:refs/remotes/origin/${defaultBranch}`)}`
+    );
     await git(`fetch --no-tags --depth=1 origin ${baseSha}`);
+    const onDefaultBranch = await git(
+      `merge-base --is-ancestor ${baseSha} ${shellQuote(`refs/remotes/origin/${defaultBranch}`)}`,
+      { allowFailure: true }
+    );
+
+    if (!onDefaultBranch.success) {
+      throw new HandoffError(
+        `Refusing to publish: base commit ${baseSha.slice(0, 12)} is not in the recent history of ${defaultBranch}.`
+      );
+    }
+
     await git(`-c advice.detachedHead=false checkout --force -B ${shellQuote(branchName)} ${baseSha}`);
 
     const root = await fs.realpath(cwd);
@@ -276,25 +298,17 @@ export async function publishCommand({
         throw new HandoffError(`Refusing ${file.path}: the checked-out path is not a regular file.`);
       }
 
-      if (path.posix.basename(file.path) === 'package.json') {
-        const baseManifest = await git(`show ${shellQuote(`${baseSha}:${file.path}`)}`, {
-          allowFailure: true
-        });
+      const baseFile = await git(`show ${shellQuote(`${baseSha}:${file.path}`)}`, {
+        allowFailure: true
+      });
+      const problems = checkDependencyFileChange(
+        file.path,
+        baseFile.success ? baseFile.stdout : null,
+        file.content.toString('utf8')
+      );
 
-        if (!baseManifest.success) {
-          throw new HandoffError(`Refusing to add a new manifest: ${file.path}`);
-        }
-
-        const outsideDependencies = findNonDependencyManifestChanges(
-          baseManifest.stdout,
-          file.content.toString('utf8')
-        );
-
-        if (outsideDependencies.length > 0) {
-          throw new HandoffError(
-            `Refusing ${file.path}: fields outside dependency sections changed (${outsideDependencies.join(', ')}).`
-          );
-        }
+      if (problems.length > 0) {
+        throw new HandoffError(`Refusing to publish: ${problems.slice(0, 5).join('; ')}.`);
       }
 
       await fs.writeFile(target, file.content);
