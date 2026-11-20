@@ -42,11 +42,12 @@ test('buildStore backdates publish times from the ages map', async () => {
   assert.ok(fresh, '@pg/fresh is in the store');
   assert.equal(fresh.packument['dist-tags'].latest, '2.0.1');
 
-  // 2.0.1 is planted ~2 hours before now; 2.0.0 is 30 days old.
+  // 2.0.1 is planted ~2 hours before now; the 2.0.0 baseline is years old so it
+  // locks cleanly under any drift date.
   const freshAgeHours = (NOW - Date.parse(fresh.packument.time['2.0.1'])) / (60 * 60 * 1000);
   assert.ok(Math.abs(freshAgeHours - 2) < 0.01, `2.0.1 should be ~2h old, was ${freshAgeHours}`);
   const baseAgeDays = (NOW - Date.parse(fresh.packument.time['2.0.0'])) / (24 * 60 * 60 * 1000);
-  assert.ok(Math.abs(baseAgeDays - 30) < 0.1, `2.0.0 should be ~30d old, was ${baseAgeDays}`);
+  assert.ok(baseAgeDays > 365, `2.0.0 baseline should be over a year old, was ${baseAgeDays}`);
 
   // Every planted scenario package is present.
   for (const name of ['@pg/semver-lie', '@pg/fresh', '@pg/canary', '@pg/peer-clash']) {
