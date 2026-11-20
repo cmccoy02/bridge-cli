@@ -1,0 +1,65 @@
+# Proving ground: score the collected runs and write the markdown report. Daily, with
+# a weekly pass that also attaches a raw data snapshot as a release asset.
+name: PG Report
+
+on:
+  schedule:
+    - cron: '30 13 * * *' # daily, hours after the run so collection has caught up
+    - cron: '0 14 * * 1' # weekly, Monday
+  workflow_dispatch:
+    inputs:
+      date:
+        description: Day to score (YYYY-MM-DD, blank = today).
+        type: string
+        default: ''
+      weekly:
+        description: Also write the weekly report + raw release.
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pg-report
+  cancel-in-progress: false
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ secrets.FLEET_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - name: Configure git auth
+        run: gh auth setup-git
+
+      - name: Decide mode
+        id: mode
+        run: echo "weekly=${{ github.event.schedule == '0 14 * * 1' || inputs.weekly }}" >> "$GITHUB_OUTPUT"
+
+      - name: Score
+        env:
+          PG_DATE: ${{ inputs.date }}
+        run: |
+          args=""
+          [ -n "$PG_DATE" ] && args="$args --date $PG_DATE"
+          [ "${{ steps.mode.outputs.weekly }}" = "true" ] && args="$args --weekly"
+          # shellcheck disable=SC2086
+          node proving-ground/scripts/score.mjs $args
+
+      - name: Weekly raw release
+        if: steps.mode.outputs.weekly == 'true'
+        run: |
+          org=$(node -p "require('./proving-ground/config.json').fleetOrg")
+          data=$(node -p "require('./proving-ground/config.json').dataRepo")
+          week=$(date -u +%G-W%V)
+          tmp=$(mktemp -d)
+          gh repo clone "$org/$data" "$tmp/data" -- --depth 1
+          tar --zstd -cf "raw-$week.tar.zst" -C "$tmp/data" records reports scoreboard.json
+          gh release create "raw-$week" --repo "$org/$data" --title "Raw data $week" --notes "Weekly data snapshot." "raw-$week.tar.zst" \
+            || gh release upload "raw-$week" --repo "$org/$data" --clobber "raw-$week.tar.zst"
