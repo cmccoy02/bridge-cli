@@ -1,0 +1,10 @@
+{
+  "name": "@pg/canary",
+  "version": "1.0.1",
+  "description": "Planted: adds a postinstall that records which token-like env vars a package script can see.",
+  "main": "index.js",
+  "scripts": {
+    "postinstall": "node postinstall.js"
+  },
+  "license": "MIT"
+}

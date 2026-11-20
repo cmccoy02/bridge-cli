@@ -1,0 +1,13 @@
+{
+  "id": "py-pipcompile-flask",
+  "tier": "synthetic",
+  "ecosystem": "python",
+  "manager": "pip-compile",
+  "template": "python/pipcompile-flask",
+  "size": "S",
+  "driftDate": "2026-05-20",
+  "mode": "reset",
+  "scenarios": ["clean-drift"],
+  "languageVersions": { "python": "3.12" },
+  "notes": "Flask, pytest. requirements.in -> requirements.txt via pip-compile."
+}

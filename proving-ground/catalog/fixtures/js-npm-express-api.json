@@ -1,0 +1,13 @@
+{
+  "id": "js-npm-express-api",
+  "tier": "synthetic",
+  "ecosystem": "javascript",
+  "manager": "npm",
+  "template": "javascript/npm-express-api",
+  "size": "S",
+  "driftDate": "2026-05-20",
+  "mode": "reset",
+  "scenarios": ["clean-drift"],
+  "languageVersions": { "node": "22" },
+  "notes": "Baseline JS service: Express + zod + axios, vitest. Only public dependencies."
+}

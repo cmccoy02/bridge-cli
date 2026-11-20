@@ -1,0 +1,13 @@
+{
+  "id": "js-pnpm-vite-react",
+  "tier": "synthetic",
+  "ecosystem": "javascript",
+  "manager": "pnpm",
+  "template": "javascript/pnpm-vite-react",
+  "size": "M",
+  "driftDate": "2025-11-20",
+  "mode": "steady",
+  "scenarios": ["clean-drift"],
+  "languageVersions": { "node": "22" },
+  "notes": "Vite + React SPA. Build and vitest are the checks. Steady: green Bridge PRs auto-merge."
+}

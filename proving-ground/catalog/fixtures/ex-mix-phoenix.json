@@ -1,0 +1,13 @@
+{
+  "id": "ex-mix-phoenix",
+  "tier": "synthetic",
+  "ecosystem": "elixir",
+  "manager": "mix",
+  "template": "elixir/mix-phoenix",
+  "size": "M",
+  "driftDate": "2025-11-20",
+  "mode": "steady",
+  "scenarios": ["clean-drift"],
+  "languageVersions": { "otp": "27", "elixir": "1.17" },
+  "notes": "Minimal Phoenix (no Ecto/assets), mix test."
+}

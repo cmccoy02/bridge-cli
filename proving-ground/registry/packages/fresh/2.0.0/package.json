@@ -1,0 +1,7 @@
+{
+  "name": "@pg/fresh",
+  "version": "2.0.0",
+  "description": "Planted: a settled release (30 days old). 2.0.1 is published only hours before the run.",
+  "main": "index.js",
+  "license": "MIT"
+}

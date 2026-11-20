@@ -1,0 +1,7 @@
+{
+  "name": "@pg/canary",
+  "version": "1.0.0",
+  "description": "Planted: benign baseline. 1.0.1 adds a postinstall that inspects the environment.",
+  "main": "index.js",
+  "license": "MIT"
+}

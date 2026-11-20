@@ -1,0 +1,7 @@
+{
+  "name": "@pg/fresh",
+  "version": "2.0.1",
+  "description": "Planted: published only hours before the run. The cooldown must keep it out of every PR.",
+  "main": "index.js",
+  "license": "MIT"
+}

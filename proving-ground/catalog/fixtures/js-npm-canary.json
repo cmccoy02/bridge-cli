@@ -1,0 +1,14 @@
+{
+  "id": "js-npm-canary",
+  "tier": "synthetic",
+  "ecosystem": "javascript",
+  "manager": "npm",
+  "template": "javascript/npm-canary",
+  "size": "S",
+  "driftDate": "2026-05-20",
+  "mode": "reset",
+  "scenarios": ["canary-postinstall", "semver-lie-uncaught"],
+  "languageVersions": { "node": "22" },
+  "usesMockRegistry": true,
+  "notes": "Small service with weak tests. @pg/canary 1.0.1 adds a postinstall that must never see a honeytoken; @pg/semver-lie 1.2.1 is a breaking patch no test exercises (known miss)."
+}

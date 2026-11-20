@@ -1,0 +1,13 @@
+{
+  "id": "ex-mix-plug",
+  "tier": "synthetic",
+  "ecosystem": "elixir",
+  "manager": "mix",
+  "template": "elixir/mix-plug",
+  "size": "S",
+  "driftDate": "2026-05-20",
+  "mode": "reset",
+  "scenarios": ["clean-drift"],
+  "languageVersions": { "otp": "27", "elixir": "1.17" },
+  "notes": "Plug + Jason, mix test."
+}
